@@ -9,7 +9,7 @@ from collections import namedtuple
 import tqdm
 
 import torch
-from torch import nn, stack, cat
+from torch import nn, stack, cat, Tensor
 import torch.nn.functional as F
 from torch.nn import Module, ModuleList, Linear
 
@@ -706,7 +706,8 @@ class MemoryAsContextTransformer(Module):
         disable_flex_attn = False,
         cache = None,
         return_cache = False,
-        factorized_pos_emb = None
+        factorized_pos_emb = None,
+        return_embeddings = False
     ):
 
         if return_loss:
@@ -714,7 +715,8 @@ class MemoryAsContextTransformer(Module):
 
         # math
 
-        batch, seq_len, neural_mem_segment_len, segment_len, num_longterm_mem_tokens, attn_window_size = *x.shape, self.neural_memory_segment_len, self.segment_len, self.num_longterm_mem_tokens, self.attn_window_size
+        batch, seq_len = x.shape[:2]
+        neural_mem_segment_len, segment_len, num_longterm_mem_tokens, attn_window_size = self.neural_memory_segment_len, self.segment_len, self.num_longterm_mem_tokens, self.attn_window_size
 
         seq_len_with_mem = self.seq_len_with_longterm_mem(seq_len)
 
@@ -909,6 +911,11 @@ class MemoryAsContextTransformer(Module):
         # to logits
 
         x = self.norm(x)
+
+        if return_embeddings:
+            if not return_cache:
+                return x
+            return x, next_cache
 
         logits = self.to_logits(x)
 
