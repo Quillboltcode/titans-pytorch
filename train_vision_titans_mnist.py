@@ -104,18 +104,24 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from einops import rearrange
+import click
 
 # Note: Ensure the TitansClassifier and MemoryAsContextTransformer 
 # from the previous steps are defined in your script.
 
-def train_cifar10():
+@click.command()
+@click.option('--batch_size', default=128, help='Batch size for training')
+@click.option('--epochs', default=20, help='Number of training epochs')
+@click.option('--learning_rate', default=3e-4, help='Learning rate')
+@click.option('--patch_size', default=4, help='Patch size for image tokenization')
+@click.option('--dim', default=256, help='Dimension of the model')
+@click.option('--depth', default=6, help='Depth of the transformer')
+@click.option('--heads', default=8, help='Number of attention heads')
+@click.option('--segment_len', default=16, help='Segment length for memory context')
+@click.option('--num_longterm_mem_tokens', default=8, help='Number of long-term memory tokens')
+def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, heads, segment_len, num_longterm_mem_tokens):
     # 1. Hyperparameters
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    batch_size = 128
-    epochs = 20
-    learning_rate = 3e-4
-    patch_size = 4  # Vital for 32x32 images
-    dim = 256
     
     # 2. Data Augmentation & Loading
     transform_train = transforms.Compose([
@@ -144,10 +150,10 @@ def train_cifar10():
         channels=3,
         num_classes=10,
         dim=dim,
-        depth=6,
-        segment_len=16,             # Processes 1/4 of the image per segment
-        num_longterm_mem_tokens=8,  # NLM capacity
-        heads=8
+        depth=depth,
+        segment_len=segment_len,             # Processes 1/4 of the image per segment
+        num_longterm_mem_tokens=num_longterm_mem_tokens,  # NLM capacity
+        heads=heads
     ).to(device)
 
     # 4. Optimizer & Loss
