@@ -156,6 +156,7 @@ def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, hea
         heads=heads,
         neural_mem_weight_residual=True,     # Critical for stability/performance per train_mac.py
         neural_memory_qkv_receives_diff_views=True, # Allows flexible grafting of memory
+        neural_memory_segment_len=8,         # Must divide neural_memory_batch_size (16). Default is segment_len (16)
         neural_memory_batch_size=16,         # Updates memory weights ~4 times per image (64 patches)
         neural_memory_layers=(2, 4),
         neural_memory_kwargs=dict(
