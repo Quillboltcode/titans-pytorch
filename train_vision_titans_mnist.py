@@ -111,8 +111,8 @@ import click
 
 @click.command()
 @click.option('--batch_size', default=128, help='Batch size for training')
-@click.option('--epochs', default=20, help='Number of training epochs')
-@click.option('--learning_rate', default=3e-4, help='Learning rate')
+@click.option('--epochs', default=50, help='Number of training epochs')
+@click.option('--learning_rate', default=1e-3, help='Learning rate')
 @click.option('--patch_size', default=4, help='Patch size for image tokenization')
 @click.option('--dim', default=256, help='Dimension of the model')
 @click.option('--depth', default=6, help='Depth of the transformer')
@@ -153,14 +153,33 @@ def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, hea
         depth=depth,
         segment_len=segment_len,             # Processes 1/4 of the image per segment
         num_longterm_mem_tokens=num_longterm_mem_tokens,  # NLM capacity
-        heads=heads
+        heads=heads,
+        neural_mem_weight_residual=True,     # Critical for stability/performance per train_mac.py
+        neural_memory_qkv_receives_diff_views=True, # Allows flexible grafting of memory
+        neural_memory_batch_size=16,         # Updates memory weights ~4 times per image (64 patches)
+        neural_memory_layers=(2, 4),
+        neural_memory_kwargs=dict(
+            dim_head=64,
+            heads=4,                         # Multi-head memory is more expressive
+            qk_rmsnorm=True,
+            momentum=True,
+            spectral_norm_surprises=True,
+            default_step_transform_max_lr=1e-1,
+            per_parameter_lr_modulation=True, # Learned LR per weight matrix
+            attn_pool_chunks=True            # Better than AvgPool for memory updates
+        )
     ).to(device)
 
     # 4. Optimizer & Loss
     # AdamW is generally preferred for Transformer-based architectures
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.05)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.1)
     criterion = nn.CrossEntropyLoss()
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    scheduler = optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=learning_rate,
+        steps_per_epoch=len(train_loader),
+        epochs=epochs
+    )
 
     # 5. Training Loop
     print(f"Starting training on {device}...")
@@ -179,9 +198,10 @@ def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, hea
             loss.backward()
             
             # Gradient clipping is recommended for Titans/NLM stability
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
             
             optimizer.step()
+            scheduler.step()
 
             total_loss += loss.item()
             _, predicted = outputs.max(1)
@@ -200,8 +220,6 @@ def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, hea
                 val_total += targets.size(0)
                 val_correct += predicted.eq(targets).sum().item()
 
-        scheduler.step()
-        
         print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(train_loader):.3f} | "
               f"Acc: {100.*correct/total:.2f}% | Val Acc: {100.*val_correct/val_total:.2f}%")
 
