@@ -75,7 +75,7 @@ class TitansMNISTGenerator(nn.Module):
         input_seq = torch.cat((class_embs, patch_embs[:, :-1]), dim=1)
         
         # 3. Pass through Titans
-        out = self.titans(input_seq) # (b, N, dim)
+        out = self.titans(input_seq, return_embeddings=True) # (b, N, dim)
         
         # 4. Predict Pixels
         pred_pixels = self.to_pixels(out) # (b, N, patch_dim)
@@ -102,7 +102,7 @@ class TitansMNISTGenerator(nn.Module):
         # Autoregressive generation loop
         for i in range(seq_len):
             # Forward pass (re-processing full sequence for simplicity)
-            out = self.titans(inputs)
+            out = self.titans(inputs, return_embeddings=True)
             
             # Get the prediction for the next patch (last token output)
             last_out = out[:, -1:]
