@@ -10,7 +10,7 @@ from torchvision.utils import save_image
 from einops import rearrange
 from titans_pytorch import MemoryAsContextTransformer
 
-class TitansMNISTGenerator(nn.Module):
+class TitansImageGenerator(nn.Module):
     def __init__(
         self,
         dim=256,
@@ -19,12 +19,16 @@ class TitansMNISTGenerator(nn.Module):
         depth=4,
         heads=8,
         segment_len=16,
-        num_longterm_mem_tokens=8
+        num_longterm_mem_tokens=8,
+        channels=1,
+        image_size=28
     ):
         super().__init__()
         self.patch_size = patch_size
         self.dim = dim
-        self.patch_dim = 1 * (patch_size ** 2) # MNIST is 1 channel (grayscale)
+        self.channels = channels
+        self.image_size = image_size
+        self.patch_dim = channels * (patch_size ** 2)
         
         # Class conditioning embedding
         self.class_emb = nn.Embedding(num_classes, dim)
@@ -90,7 +94,7 @@ class TitansMNISTGenerator(nn.Module):
     def sample(self, labels, device):
         # labels: (b,)
         b = labels.shape[0]
-        h = w = 28 // self.patch_size
+        h = w = self.image_size // self.patch_size
         seq_len = h * w
         
         # Start with class token
@@ -117,7 +121,7 @@ class TitansMNISTGenerator(nn.Module):
                 
         # Reassemble image
         full_patches = torch.cat(generated_patches, dim=1) # (b, N, patch_dim)
-        img = rearrange(full_patches, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1=self.patch_size, p2=self.patch_size, c=1)
+        img = rearrange(full_patches, 'b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h=h, w=w, p1=self.patch_size, p2=self.patch_size, c=self.channels)
         return img.clamp(0, 1)
 
 @click.command()
@@ -127,18 +131,28 @@ class TitansMNISTGenerator(nn.Module):
 @click.option('--patch_size', default=4, help='Patch size')
 @click.option('--dim', default=256, help='Model dimension')
 @click.option('--depth', default=4, help='Transformer depth')
-def train(batch_size, epochs, lr, patch_size, dim, depth):
+@click.option('--dataset', default='mnist', help='Dataset to use: mnist or cifar10')
+def train(batch_size, epochs, lr, patch_size, dim, depth, dataset):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on {device}")
     
     # Data
     transform = transforms.Compose([transforms.ToTensor()])
     os.makedirs('./data', exist_ok=True)
-    ds = datasets.MNIST('./data', train=True, download=True, transform=transform)
+    
+    if dataset == 'mnist':
+        ds = datasets.MNIST('./data', train=True, download=True, transform=transform)
+        channels = 1
+        image_size = 28
+    elif dataset == 'cifar10':
+        ds = datasets.CIFAR10('./data', train=True, download=True, transform=transform)
+        channels = 3
+        image_size = 32
+        
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=2)
     
     # Model
-    model = TitansMNISTGenerator(dim=dim, patch_size=patch_size, depth=depth, num_classes=10).to(device)
+    model = TitansImageGenerator(dim=dim, patch_size=patch_size, depth=depth, num_classes=10, channels=channels, image_size=image_size).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(loader), epochs=epochs)
     
