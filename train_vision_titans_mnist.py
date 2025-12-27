@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from einops import rearrange
+from einops.layers.torch import Rearrange
 from titans_pytorch import MemoryAsContextTransformer
 
 class TitansImageGenerator(nn.Module):
@@ -34,9 +35,14 @@ class TitansImageGenerator(nn.Module):
         self.class_emb = nn.Embedding(num_classes, dim)
         
         # Patch embedding components
-        # We split this to reuse the linear layer during generation loop
         self.patch_emb_layer = nn.Sequential(
-            nn.Linear(self.patch_dim, dim),
+            nn.Conv2d(channels, dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(dim // 2),
+            nn.GELU(),
+            nn.Conv2d(dim // 2, dim, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            Rearrange('b d h w -> b (h w) d'),
             nn.LayerNorm(dim)
         )
         
@@ -60,10 +66,8 @@ class TitansImageGenerator(nn.Module):
         self.to_pixels = nn.Linear(dim, self.patch_dim)
 
     def get_patch_embeddings(self, img):
-        # img: (b, 1, 28, 28)
-        # Create patches: (b, num_patches, patch_dim)
-        patches = rearrange(img, 'b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=self.patch_size, p2=self.patch_size)
-        return self.patch_emb_layer(patches)
+        # img: (b, c, h, w)
+        return self.patch_emb_layer(img)
 
     def forward(self, img, labels):
         # img: (b, 1, 28, 28)
@@ -116,7 +120,8 @@ class TitansImageGenerator(nn.Module):
             
             # Prepare input for next step (if not finished)
             if i < seq_len - 1:
-                pred_patch_emb = self.patch_emb_layer(pred_patch)
+                pred_patch_img = rearrange(pred_patch, 'b 1 (p1 p2 c) -> b c p1 p2', p1=self.patch_size, p2=self.patch_size, c=self.channels)
+                pred_patch_emb = self.patch_emb_layer(pred_patch_img)
                 inputs = torch.cat((inputs, pred_patch_emb), dim=1)
                 
         # Reassemble image

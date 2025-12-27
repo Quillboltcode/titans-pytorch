@@ -63,9 +63,13 @@ class TitansClassifier(nn.Module):
 
         # 1. Custom Patch Embedding instead of nn.Embedding
         self.patch_to_emb = nn.Sequential(
-            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=patch_size, p2=patch_size),
-            nn.LayerNorm(patch_dim),
-            nn.Linear(patch_dim, dim),
+            nn.Conv2d(channels, dim // 2, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(dim // 2),
+            nn.GELU(),
+            nn.Conv2d(dim // 2, dim, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            Rearrange('b d h w -> b (h w) d'),
             nn.LayerNorm(dim)
         )
 
