@@ -7,7 +7,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
-from torch.cuda.amp import autocast, GradScaler
 from einops import rearrange
 from titans_pytorch import MemoryAsContextTransformer
 
@@ -321,7 +320,7 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(loader), epochs=epochs_titans)
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler('cuda')
     
     latent_h = image_size // 4 # VQVAE downsamples by 4
     
@@ -331,7 +330,7 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
         for imgs, labels in loader:
             imgs, labels = imgs.to(device), labels.to(device)
             
-            with autocast():
+            with torch.amp.autocast('cuda'):
                 loss = model(imgs, labels)
             
             optimizer.zero_grad()
