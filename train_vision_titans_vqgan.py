@@ -7,6 +7,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
+from torch.cuda.amp import autocast, GradScaler
 from einops import rearrange
 from titans_pytorch import MemoryAsContextTransformer
 
@@ -243,12 +244,12 @@ class TitansLatentImageGenerator(nn.Module):
         return self.vqvae.decode_indices(indices)
 
 @click.command()
-@click.option('--batch_size', default=32, help='Batch size')
+@click.option('--batch_size', default=8, help='Batch size')
 @click.option('--epochs_vq', default=10, help='Epochs for VQVAE')
 @click.option('--epochs_titans', default=50, help='Epochs for Titans')
 @click.option('--lr', default=3e-4, help='Learning rate')
-@click.option('--dim', default=512, help='Model dimension')
-@click.option('--depth', default=12, help='Transformer depth')
+@click.option('--dim', default=384, help='Model dimension')
+@click.option('--depth', default=8, help='Transformer depth')
 @click.option('--dataset', default='cifar10', help='Dataset: cifar10 or mnist')
 def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -320,6 +321,7 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(loader), epochs=epochs_titans)
+    scaler = GradScaler()
     
     latent_h = image_size // 4 # VQVAE downsamples by 4
     
@@ -328,12 +330,16 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
         total_loss = 0
         for imgs, labels in loader:
             imgs, labels = imgs.to(device), labels.to(device)
-            loss = model(imgs, labels)
+            
+            with autocast():
+                loss = model(imgs, labels)
             
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             total_loss += loss.item()
             
