@@ -299,9 +299,13 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
             
             print(f"VQVAE Epoch {epoch+1} | Loss: {total_loss/len(loader):.4f}")
             if (epoch+1) % 5 == 0:
-                save_image(torch.cat([imgs[:8], recon[:8]], dim=0), f'results/vq_recon_{epoch+1}.png', nrow=8)
+                save_image(torch.cat([imgs[:8], recon[:8].detach()], dim=0), f'results/vq_recon_{epoch+1}.png', nrow=8)
         
         torch.save(vqvae.state_dict(), vq_path)
+        
+        # Cleanup VQVAE optimizer and cache to free memory for Titans
+        del opt_vq
+        torch.cuda.empty_cache()
 
     # Initialize Titans
     print("Training Titans...")
