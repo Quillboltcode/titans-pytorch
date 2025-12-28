@@ -8,6 +8,17 @@ from einops import rearrange
 from einops.layers.torch import Rearrange
 from titans_pytorch import MemoryAsContextTransformer
 
+"""
+einops notation cheat sheet:
+b: batch size
+c: channels
+h: height
+w: width
+p1, p2: patch dimensions
+n: sequence length (number of patches)
+d: feature dimension
+"""
+
 class TitansVisionModel(Module):
     def __init__(self, dim=512, patch_size=4, depth=6):
         super().__init__()
