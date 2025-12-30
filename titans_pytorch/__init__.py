@@ -12,6 +12,10 @@ from titans_pytorch.memory_models import (
     GatedResidualMemoryMLP
 )
 
+from titans_pytorch.memory_as_gating import (
+    MemoryAsGating
+)
+
 from titans_pytorch.mac_transformer import (
     MemoryAsContextTransformer
 )

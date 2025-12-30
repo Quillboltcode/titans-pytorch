@@ -1,4 +1,5 @@
 import os
+import math
 import click
 import torch
 import torch.nn as nn
@@ -128,7 +129,7 @@ class TitansLatentImageGenerator(nn.Module):
         depth=12,
         heads=8,
         segment_len=32,
-        num_longterm_mem_tokens=16,
+        num_longterm_mem_tokens=0, # MAG do not use longterm memory by default
         max_seq_len=1024
     ):
         super().__init__()
@@ -142,7 +143,8 @@ class TitansLatentImageGenerator(nn.Module):
         # Embeddings
         self.class_emb = nn.Embedding(num_classes, dim)
         self.token_emb = nn.Embedding(self.num_tokens, dim)
-        self.pos_emb = nn.Parameter(torch.randn(1, max_seq_len, dim))
+        side_len = int(math.sqrt(max_seq_len))
+        self.pos_emb = nn.Parameter(torch.randn(1, side_len, side_len, dim))
         
         # Titans
         # Distribute memory layers across depth
@@ -158,7 +160,10 @@ class TitansLatentImageGenerator(nn.Module):
             num_tokens=self.num_tokens, # Not used directly due to manual embedding
             token_emb=nn.Identity(), 
             segment_len=segment_len,
+            # Memory as gating parameters
+            neural_mem_gate_attn_output=True,
             num_longterm_mem_tokens=num_longterm_mem_tokens,
+            num_persist_mem_tokens=4,
             heads=heads,
             neural_memory_layers=tuple(mem_layers),
             neural_mem_weight_residual=True,
@@ -174,10 +179,12 @@ class TitansLatentImageGenerator(nn.Module):
         # 1. Get discrete tokens from VQVAE
         with torch.no_grad():
             indices = self.vqvae.get_indices(img) # (B, H', W')
+        
+        b, h, w = indices.shape
             
         # Flatten indices
         indices = rearrange(indices, 'b h w -> b (h w)') # (B, N)
-        b, n = indices.shape
+        n = indices.shape[1]
         
         # 2. Embed inputs
         # Class embedding
@@ -185,7 +192,10 @@ class TitansLatentImageGenerator(nn.Module):
         
         # Token embeddings + Positional embeddings
         t_emb = self.token_emb(indices) # (B, N, dim)
-        t_emb = t_emb + self.pos_emb[:, :n]
+        
+        pos_emb = self.pos_emb[:, :h, :w, :]
+        pos_emb = rearrange(pos_emb, 'b h w d -> b (h w) d')
+        t_emb = t_emb + pos_emb
         
         # 3. Construct Autoregressive Input
         # Input: [Class, T_0, ..., T_{N-2}]
@@ -202,7 +212,7 @@ class TitansLatentImageGenerator(nn.Module):
         return F.cross_entropy(rearrange(logits, 'b n c -> b c n'), indices)
 
     @torch.no_grad()
-    def sample(self, labels, shape, device):
+    def sample(self, labels, shape, device, top_k=None):
         # labels: (B,)
         # shape: (H_latent, W_latent)
         h, w = shape
@@ -215,6 +225,9 @@ class TitansLatentImageGenerator(nn.Module):
         
         generated_indices = []
         
+        pos_emb = self.pos_emb[:, :h, :w, :]
+        pos_emb = rearrange(pos_emb, 'b h w d -> b (h w) d')
+        
         for i in range(seq_len):
             # Forward pass
             out = self.titans(inputs, return_embeddings=True)
@@ -222,6 +235,10 @@ class TitansLatentImageGenerator(nn.Module):
             # Predict next token from last output
             last_out = out[:, -1:]
             logits = self.to_logits(last_out)
+            
+            if top_k is not None:
+                v, _ = torch.topk(logits, top_k)
+                logits[logits < v[..., [-1]]] = -float('Inf')
             
             # Sample
             probs = F.softmax(logits, dim=-1)
@@ -232,7 +249,7 @@ class TitansLatentImageGenerator(nn.Module):
             if i < seq_len - 1:
                 next_emb = self.token_emb(next_token)
                 # Add pos emb
-                next_emb = next_emb + self.pos_emb[:, i+1:i+2] # Shift by 1 because pos 0 is class
+                next_emb = next_emb + pos_emb[:, i:i+1]
                 inputs = torch.cat((inputs, next_emb), dim=1)
         
         # Reassemble indices
@@ -243,7 +260,7 @@ class TitansLatentImageGenerator(nn.Module):
         return self.vqvae.decode_indices(indices)
 
 @click.command()
-@click.option('--batch_size', default=8, help='Batch size')
+@click.option('--batch_size', default=10, help='Batch size')
 @click.option('--epochs_vq', default=10, help='Epochs for VQVAE')
 @click.option('--epochs_titans', default=50, help='Epochs for Titans')
 @click.option('--lr', default=3e-4, help='Learning rate')
@@ -299,7 +316,7 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
             
             print(f"VQVAE Epoch {epoch+1} | Loss: {total_loss/len(loader):.4f}")
             if (epoch+1) % 5 == 0:
-                save_image(torch.cat([imgs[:8], recon[:8].detach()], dim=0), f'results/vq_recon_{epoch+1}.png', nrow=8)
+                save_image(torch.cat([imgs[:10], recon[:10].detach()], dim=0), f'results/vq_recon_{epoch+1}.png', nrow=10)
         
         torch.save(vqvae.state_dict(), vq_path)
         
@@ -315,7 +332,7 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
         depth=depth,
         num_classes=10,
         segment_len=32, # Increased segment length
-        num_longterm_mem_tokens=16
+        num_longterm_mem_tokens=0
     ).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
