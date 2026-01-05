@@ -396,7 +396,7 @@ def train(batch_size, kaggle_root, grad_accum_steps, epochs_vq, epochs_titans, l
         dim=dim,
         depth=depth,
         num_classes=num_classes,
-        segment_len=32, # Increased segment length
+        segment_len=128, # Increased segment length based on image size
         num_longterm_mem_tokens=0
     ).to(device)
     
