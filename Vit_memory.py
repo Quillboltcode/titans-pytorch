@@ -36,7 +36,6 @@ class MemoryFFNTransformerBlock(nn.Module):
         self.neural_memory = NeuralMemory(
             dim = dim,
             chunk_size = memory_chunk_size,
-            num_persistent_tokens = num_persistent_mem_tokens,
             qkv_receives_diff_views = False
         )
         
