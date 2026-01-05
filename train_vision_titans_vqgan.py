@@ -260,14 +260,15 @@ class TitansLatentImageGenerator(nn.Module):
         return self.vqvae.decode_indices(indices)
 
 @click.command()
-@click.option('--batch_size', default=10, help='Batch size')
+@click.option('--batch_size', default=32, help='Batch size')
+@click.option('--grad_accum_steps', default=4, help='Gradient accumulation steps')
 @click.option('--epochs_vq', default=10, help='Epochs for VQVAE')
 @click.option('--epochs_titans', default=50, help='Epochs for Titans')
 @click.option('--lr', default=3e-4, help='Learning rate')
 @click.option('--dim', default=384, help='Model dimension')
 @click.option('--depth', default=8, help='Transformer depth')
-@click.option('--dataset', default='cifar10', help='Dataset: cifar10 or mnist')
-def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
+@click.option('--dataset', default='cifar10', help='Dataset: cifar10 or mnist or celeba')
+def train(batch_size, grad_accum_steps, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on {device}")
     
@@ -279,21 +280,38 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     os.makedirs('./results', exist_ok=True)
     os.makedirs('./checkpoints', exist_ok=True)
     
+    num_classes = 10
+
     if dataset == 'cifar10':
         ds = datasets.CIFAR10('./data', train=True, download=True, transform=transform)
         channels = 3
         image_size = 32
-    else:
+    elif dataset == 'mnist':
         ds = datasets.MNIST('./data', train=True, download=True, transform=transform)
         channels = 1
         image_size = 28
+    elif dataset == 'celeba':
+        try:
+            import gdown
+        except ImportError:
+            os.system('pip install gdown')
+
+        transform = transforms.Compose([
+            transforms.Resize(128),
+            transforms.CenterCrop(128),
+            transforms.ToTensor(),
+        ])
+        ds = datasets.CelebA('./data', split='train', download=True, transform=transform, target_type='attr', target_transform=lambda t: t[20].long())
+        channels = 3
+        image_size = 128
+        num_classes = 2
         
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, drop_last=True, num_workers=4)
     
     # Initialize VQVAE
-    vqvae = VQVAE(in_channels=channels, hidden_dim=128, num_embeddings=512, embedding_dim=64).to(device)
+    vqvae = VQVAE(in_channels=channels, hidden_dim=256, num_embeddings=512, embedding_dim=128).to(device)
     
-    vq_path = './checkpoints/vqvae.pt'
+    vq_path = f'./checkpoints/vqvae_{dataset}.pt'
     if os.path.exists(vq_path):
         print("Loading VQVAE from checkpoint...")
         vqvae.load_state_dict(torch.load(vq_path))
@@ -316,7 +334,7 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
             
             print(f"VQVAE Epoch {epoch+1} | Loss: {total_loss/len(loader):.4f}")
             if (epoch+1) % 5 == 0:
-                save_image(torch.cat([imgs[:10], recon[:10].detach()], dim=0), f'results/vq_recon_{epoch+1}.png', nrow=10)
+                save_image(torch.cat([imgs[:10], recon[:10].detach()], dim=0), f'results/vq_recon_{dataset}_{epoch+1}.png', nrow=10)
         
         torch.save(vqvae.state_dict(), vq_path)
         
@@ -330,13 +348,13 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
         vqvae=vqvae,
         dim=dim,
         depth=depth,
-        num_classes=10,
+        num_classes=num_classes,
         segment_len=32, # Increased segment length
         num_longterm_mem_tokens=0
     ).to(device)
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(loader), epochs=epochs_titans)
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=lr, steps_per_epoch=len(loader) // grad_accum_steps, epochs=epochs_titans)
     scaler = torch.amp.GradScaler('cuda')
     
     latent_h = image_size // 4 # VQVAE downsamples by 4
@@ -344,28 +362,34 @@ def train(batch_size, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     for epoch in range(epochs_titans):
         model.train()
         total_loss = 0
-        for imgs, labels in loader:
+        optimizer.zero_grad()
+        
+        for idx, (imgs, labels) in enumerate(loader):
             imgs, labels = imgs.to(device), labels.to(device)
             
             with torch.amp.autocast('cuda'):
-                loss = model(imgs, labels)
+                loss = model(imgs, labels) / grad_accum_steps
             
-            optimizer.zero_grad()
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            scheduler.step()
-            total_loss += loss.item()
+            
+            if (idx + 1) % grad_accum_steps == 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                optimizer.zero_grad()
+            
+            total_loss += loss.item() * grad_accum_steps
             
         print(f"Titans Epoch {epoch+1} | Loss: {total_loss/len(loader):.4f}")
         
         if (epoch + 1) % 5 == 0:
             model.eval()
-            sample_labels = torch.arange(10).to(device).repeat(2)
+            sample_labels = torch.arange(num_classes).to(device)
+            sample_labels = sample_labels.repeat(20 // num_classes + 1)[:20]
             samples = model.sample(sample_labels, (latent_h, latent_h), device)
-            save_image(samples, f'results/titans_sample_{epoch+1}.png', nrow=10)
+            save_image(samples, f'results/titans_sample_{dataset}_{epoch+1}.png', nrow=10)
 
 if __name__ == '__main__':
     train()
