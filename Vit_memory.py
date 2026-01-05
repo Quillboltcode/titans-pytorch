@@ -29,7 +29,6 @@ class MemoryFFNTransformerBlock(nn.Module):
         
         # 2. Neural Memory (Replacing FFN)
         self.norm_mem = nn.LayerNorm(dim)
-        self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
         
         # Initialize Neural Memory
         # qkv_receives_diff_views = False for this standard implementation
@@ -52,11 +51,9 @@ class MemoryFFNTransformerBlock(nn.Module):
         mem_residual = x
         x_norm = self.norm_mem(x)
         
-        q, k, v = self.to_qkv(x_norm).chunk(3, dim = -1)
-        
         # Neural Memory Forward
         mem_out, next_memory_state = self.neural_memory(
-            (q, k, v), 
+            x_norm, 
             state = memory_state
         )
         
@@ -81,6 +78,7 @@ class MemoryViT(nn.Module):
         memory_chunk_size = 64 # Equal to sequence length (8*8)
     ):
         super().__init__()
+        self.patch_size = patch_size
         assert image_size % patch_size == 0
         
         num_patches = (image_size // patch_size) ** 2
@@ -143,12 +141,6 @@ class MemoryViT(nn.Module):
         
         return self.to_logits(self.norm(cls_token_out))
 
-    @property
-    def patch_size(self):
-        # Helper to infer patch_size from to_patch_embedding logic or hardcoded
-        # Assuming 4x4 for this script, but ideally stored as a variable
-        return 4
-
 # -----------------------------------------------------------------------------
 # Training Loop
 # -----------------------------------------------------------------------------
@@ -197,7 +189,7 @@ def train(batch_size, epochs, lr, dim):
     print(f"Total Parameters: {params:,}")
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
-    scheduler = optim.CosineAnnealingLR(optimizer, T_max=epochs)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.CrossEntropyLoss()
     
     for epoch in range(epochs):
