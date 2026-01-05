@@ -302,6 +302,7 @@ class TitansLatentImageGenerator(nn.Module):
 
 @click.command()
 @click.option('--batch_size', default=32, help='Batch size')
+@click.option('--kaggle_root', default='/kaggle/input/face-vae', help='Kaggle dataset root')
 @click.option('--grad_accum_steps', default=4, help='Gradient accumulation steps')
 @click.option('--epochs_vq', default=10, help='Epochs for VQVAE')
 @click.option('--epochs_titans', default=50, help='Epochs for Titans')
@@ -309,7 +310,7 @@ class TitansLatentImageGenerator(nn.Module):
 @click.option('--dim', default=384, help='Model dimension')
 @click.option('--depth', default=8, help='Transformer depth')
 @click.option('--dataset', default='cifar10', help='Dataset: cifar10 or mnist or celeba')
-def train(batch_size, grad_accum_steps, epochs_vq, epochs_titans, lr, dim, depth, dataset):
+def train(batch_size, kaggle_root, grad_accum_steps, epochs_vq, epochs_titans, lr, dim, depth, dataset):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on {device}")
     
@@ -338,7 +339,6 @@ def train(batch_size, grad_accum_steps, epochs_vq, epochs_titans, lr, dim, depth
             transforms.ToTensor(),
         ])
         
-        kaggle_root = '/kaggle/input/face-vae'
         if os.path.exists(kaggle_root):
             print(f"Loading CelebA from Kaggle dataset at {kaggle_root}")
             ds = KaggleCelebA(kaggle_root, split='train', transform=transform)
