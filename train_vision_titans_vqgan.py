@@ -9,11 +9,52 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from einops import rearrange
+from PIL import Image
 from titans_pytorch import MemoryAsContextTransformer
 
 # -----------------------------------------------------------------------------
 # VQ-VAE Components (Stage 1)
 # -----------------------------------------------------------------------------
+
+class KaggleCelebA(torch.utils.data.Dataset):
+    def __init__(self, root, split='train', transform=None):
+        self.root = root
+        self.transform = transform
+        import pandas as pd
+        
+        # Load CSVs
+        attr_df = pd.read_csv(os.path.join(root, 'list_attr_celeba.csv'))
+        part_df = pd.read_csv(os.path.join(root, 'list_eval_partition.csv'))
+        
+        self.df = pd.merge(attr_df, part_df, on='image_id')
+        
+        # Filter split
+        # 0: Train, 1: Valid, 2: Test
+        split_map = {'train': 0, 'valid': 1, 'test': 2}
+        self.df = self.df[self.df['partition'] == split_map.get(split, 0)].reset_index(drop=True)
+        
+        # Image directory
+        self.img_dir = os.path.join(root, 'img_align_celeba/img_align_celeba')
+        if not os.path.exists(self.img_dir):
+            self.img_dir = os.path.join(root, 'img_align_celeba')
+            
+    def __len__(self):
+        return len(self.df)
+        
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        img_path = os.path.join(self.img_dir, row['image_id'])
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+            
+        # Target: Male (1) or Female (0)
+        # CelebA attributes: 1 for present, -1 for absent
+        attr = row['Male']
+        label = 1 if attr == 1 else 0
+        
+        return image, torch.tensor(label).long()
 
 class VectorQuantizer(nn.Module):
     def __init__(self, num_embeddings, embedding_dim, commitment_cost=0.25):
@@ -291,17 +332,23 @@ def train(batch_size, grad_accum_steps, epochs_vq, epochs_titans, lr, dim, depth
         channels = 1
         image_size = 28
     elif dataset == 'celeba':
-        try:
-            import gdown
-        except ImportError:
-            os.system('pip install gdown')
-
         transform = transforms.Compose([
             transforms.Resize(128),
             transforms.CenterCrop(128),
             transforms.ToTensor(),
         ])
-        ds = datasets.CelebA('./data', split='train', download=True, transform=transform, target_type='attr', target_transform=lambda t: t[20].long())
+        
+        kaggle_root = '/kaggle/input/face-vae'
+        if os.path.exists(kaggle_root):
+            print(f"Loading CelebA from Kaggle dataset at {kaggle_root}")
+            ds = KaggleCelebA(kaggle_root, split='train', transform=transform)
+        else:
+            try:
+                import gdown
+            except ImportError:
+                os.system('pip install gdown')
+            ds = datasets.CelebA('./data', split='train', download=True, transform=transform, target_type='attr', target_transform=lambda t: t[20].long())
+            
         channels = 3
         image_size = 128
         num_classes = 2
