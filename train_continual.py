@@ -24,6 +24,7 @@ from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
 import wandb
+from types import SimpleNamespace
 
 def ddp_setup(rank, world_size):
     """Initialize DDP process group."""
@@ -637,22 +638,20 @@ def main_worker(rank, world_size, args):
 def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim, 
          drop_path_rate, memory_chunk_size, checkpoint_path, save_path):
     
-    # Create args object for main_worker
-    class Args:
-        pass
-    
-    args = Args()
-    args.model_type = model_type
-    args.phase = phase
-    args.epochs_task_a = epochs_task_a
-    args.epochs_task_b = epochs_task_b
-    args.batch_size = batch_size
-    args.lr = lr
-    args.dim = dim
-    args.drop_path_rate = drop_path_rate
-    args.memory_chunk_size = memory_chunk_size
-    args.checkpoint_path = checkpoint_path
-    args.save_path = save_path
+    # Create args object for main_worker using SimpleNamespace
+    args = SimpleNamespace(
+        model_type=model_type,
+        phase=phase,
+        epochs_task_a=epochs_task_a,
+        epochs_task_b=epochs_task_b,
+        batch_size=batch_size,
+        lr=lr,
+        dim=dim,
+        drop_path_rate=drop_path_rate,
+        memory_chunk_size=memory_chunk_size,
+        checkpoint_path=checkpoint_path,
+        save_path=save_path
+    )
     
     # Detect number of GPUs
     world_size = torch.cuda.device_count()
