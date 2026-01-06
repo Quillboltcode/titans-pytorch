@@ -18,12 +18,13 @@ from datetime import datetime
 @click.command()
 @click.option('--epochs_task_a', default=30, help='Epochs per task')
 @click.option('--epochs_task_b', default=30, help='Epochs per task')
-@click.option('--batch_size', default=64, help='Batch size')
-@click.option('--lr', default=3e-4, help='Learning rate')
+@click.option('--batch_size', default=128, help='Batch size per GPU')
+@click.option('--lr', default=6e-4, help='Learning rate (scaled for batch_size=128)')
 @click.option('--dim', default=192, help='Model dimension')
+@click.option('--num_gpus', default=2, help='Number of GPUs')
 @click.option('--skip_standard', is_flag=True, help='Skip Standard ViT baseline')
 @click.option('--skip_memory', is_flag=True, help='Skip Memory ViT')
-def run_comparison(epochs_task_a, epochs_task_b, batch_size, lr, dim, 
+def run_comparison(epochs_task_a, epochs_task_b, batch_size, lr, dim, num_gpus,
                    skip_standard, skip_memory):
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -35,6 +36,7 @@ def run_comparison(epochs_task_a, epochs_task_b, batch_size, lr, dim,
             'batch_size': batch_size,
             'learning_rate': lr,
             'dim': dim,
+            'num_gpus': num_gpus,
         },
         'standard': None,
         'memory': None,
@@ -47,6 +49,7 @@ def run_comparison(epochs_task_a, epochs_task_b, batch_size, lr, dim,
         '--batch_size', str(batch_size),
         '--lr', str(lr),
         '--dim', str(dim),
+        '--num_gpus', str(num_gpus),
         '--phase', 'both',
     ]
     

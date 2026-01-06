@@ -493,21 +493,33 @@ def train_phase(model, train_loader, test_loader, task_name, epochs, lr, device,
               help='Training phase: 1 (Task A), 2 (Task B), or both')
 @click.option('--epochs_task_a', default=50, help='Epochs for Task A')
 @click.option('--epochs_task_b', default=50, help='Epochs for Task B')
-@click.option('--batch_size', default=64, help='Batch size')
-@click.option('--lr', default=3e-4, help='Learning rate')
+@click.option('--batch_size', default=128, help='Batch size per GPU')
+@click.option('--lr', default=6e-4, help='Learning rate (scaled for batch_size=128)')
 @click.option('--dim', default=192, help='Model dimension')
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--memory_chunk_size', default=64, help='Memory chunk size (for Memory ViT)')
 @click.option('--checkpoint_path', default=None, help='Path to load checkpoint')
 @click.option('--save_path', default='./checkpoints', help='Path to save checkpoints')
+@click.option('--num_gpus', default=2, help='Number of GPUs to use')
 def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim, 
-         drop_path_rate, memory_chunk_size, checkpoint_path, save_path):
+         drop_path_rate, memory_chunk_size, checkpoint_path, save_path, num_gpus):
     
+    # Set up multi-GPU training
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Running experiment with {model_type} ViT on {device}")
+    
+    # Calculate effective batch size and scale learning rate
+    effective_batch_size = batch_size * num_gpus
+    print(f"Using {num_gpus} GPU(s), effective batch size: {effective_batch_size}")
+    
+    # Linear learning rate scaling rule: lr_new = lr_base * (batch_new / batch_base)
+    # Base: batch_size=64, lr=3e-4
+    # For batch_size=128: lr=6e-4 (already scaled in default)
+    # For batch_size=256: lr=1.2e-3
+    
+    print(f"Training with {model_type} ViT on {device} (batch_size={effective_batch_size}, lr={lr})")
     
     # Initialize wandb
-    wandb.init(project='continual-learning-splits', name=f'{model_type}_split_cifar10')
+    wandb.init(project='memory-vit-cifar10', name=f'{model_type}_split_cifar10')
     wandb.config.update({
         'model_type': model_type,
         'epochs_task_a': epochs_task_a,
@@ -547,6 +559,11 @@ def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim,
             drop_path_rate=drop_path_rate,
             memory_chunk_size=memory_chunk_size
         ).to(device)
+        
+        # Wrap with DataParallel for multi-GPU training
+        if num_gpus > 1 and torch.cuda.device_count() > 1:
+            print(f"Wrapping model with DataParallel on {torch.cuda.device_count()} GPUs")
+            model = torch.nn.DataParallel(model)
         
         # Count parameters
         params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -608,6 +625,11 @@ def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim,
         # We keep the same dimension but reinitialize the head
         num_classes_B = 5
         model.to_logits = nn.Linear(dim, num_classes_B).to(device)
+        
+        # Wrap with DataParallel for multi-GPU training
+        if num_gpus > 1 and torch.cuda.device_count() > 1:
+            print(f"Wrapping model with DataParallel on {torch.cuda.device_count()} GPUs")
+            model = torch.nn.DataParallel(model)
         
         # Get data loaders for Task B
         loaders_B = get_data_loaders(batch_size, task='B')
