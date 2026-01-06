@@ -176,3 +176,6 @@ data/MNIST
 data/cifar-10-batches-py
 data/cifar-10-python.tar.gz
 p5js.html
+plans/
+plans
+results.md

@@ -9,6 +9,24 @@ from torchvision import datasets, transforms
 from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
+import wandb
+
+# -----------------------------------------------------------------------------
+# Helper: DropPath (Stochastic Depth)
+# -----------------------------------------------------------------------------
+
+class DropPath(nn.Module):
+    def __init__(self, p=0.):
+        super().__init__()
+        self.p = p
+
+    def forward(self, x):
+        if self.p == 0. or not self.training:
+            return x
+        keep_prob = 1 - self.p
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
+        return x.div(keep_prob) * random_tensor
 
 # -----------------------------------------------------------------------------
 # Memory Transformer Block (Strategy 2)
@@ -20,7 +38,8 @@ class MemoryFFNTransformerBlock(nn.Module):
         dim,
         heads,
         memory_chunk_size = 64,
-        num_persistent_mem_tokens = 4
+        num_persistent_mem_tokens = 4,
+        drop_path = 0.
     ):
         super().__init__()
         
@@ -40,13 +59,14 @@ class MemoryFFNTransformerBlock(nn.Module):
         )
         
         self.to_out = nn.Linear(dim, dim, bias=False)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, memory_state = None):
         # Attention Branch
         attn_residual = x
         x_norm = self.norm_attn(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x = attn_residual + attn_out
+        x = attn_residual + self.drop_path(attn_out)
         
         # Memory Branch (Replacing FFN)
         mem_residual = x
@@ -59,7 +79,7 @@ class MemoryFFNTransformerBlock(nn.Module):
         )
         
         # Combine
-        x = mem_residual + self.to_out(mem_out)
+        x = mem_residual + self.drop_path(self.to_out(mem_out))
         
         return x, next_memory_state
 
@@ -76,7 +96,8 @@ class MemoryViT(nn.Module):
         dim = 192,           # Small dimension for CIFAR
         depth = 6,
         heads = 3,
-        memory_chunk_size = 64 # Equal to sequence length (8*8)
+        memory_chunk_size = 64, # Equal to sequence length (8*8)
+        drop_path_rate = 0.
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -100,12 +121,14 @@ class MemoryViT(nn.Module):
         
         # 4. Transformer Layers
         self.layers = nn.ModuleList([])
-        for _ in range(depth):
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+        for i in range(depth):
             self.layers.append(
                 MemoryFFNTransformerBlock(
                     dim=dim, 
                     heads=heads, 
-                    memory_chunk_size=memory_chunk_size
+                    memory_chunk_size=memory_chunk_size,
+                    drop_path=dpr[i]
                 )
             )
             
@@ -129,6 +152,10 @@ class MemoryViT(nn.Module):
         # Note: Standard ViT prepends, but we APPEND it to the end for the causal memory
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
         x = torch.cat((x, cls_tokens), dim = 1) 
+
+        # Debug check (optional, remove in production):
+        # Ensure sequence length exceeds chunk size slightly to force memory usage for CLS
+        # assert x.shape[1] > self.layers[0].neural_memory.chunk_size
         
         # 4. Pass through Memory Layers
         memory_states = [None] * len(self.layers)
@@ -151,9 +178,20 @@ class MemoryViT(nn.Module):
 @click.option('--epochs', default=50, help='Number of epochs')
 @click.option('--lr', default=3e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
-def train(batch_size, epochs, lr, dim):
+@click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
+@click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
+def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on {device}")
+    
+    wandb.init(project=wandb_project, config={
+        "learning_rate": lr,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "dim": dim,
+        "drop_path_rate": drop_path_rate,
+        "architecture": "MemoryViT"
+    })
     
     # Augmentation is key for CIFAR
     transform_train = transforms.Compose([
@@ -182,7 +220,8 @@ def train(batch_size, epochs, lr, dim):
         dim=dim,
         depth=6,
         heads=3,
-        memory_chunk_size=64 # 8x8 patches + 1 CLS = 65, so chunk 64 is perfect
+        memory_chunk_size=64, # 8x8 patches + 1 CLS = 65, so chunk 64 is perfect
+        drop_path_rate=drop_path_rate
     ).to(device)
     
     # Count parameters
@@ -217,6 +256,12 @@ def train(batch_size, epochs, lr, dim):
         acc = 100. * correct / total
         print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.2f}%")
         
+        wandb.log({
+            "train_loss": total_loss/len(train_loader),
+            "train_acc": acc,
+            "epoch": epoch + 1
+        })
+        
         # Validation
         if (epoch + 1) % 5 == 0:
             model.eval()
@@ -233,6 +278,13 @@ def train(batch_size, epochs, lr, dim):
                     total += labels.size(0)
                     correct += predicted.eq(labels).sum().item()
             print(f"--> Test Loss: {test_loss/len(test_loader):.4f} | Test Acc: {100.*correct/total:.2f}%")
+            wandb.log({
+                "test_loss": test_loss/len(test_loader),
+                "test_acc": 100.*correct/total,
+                "epoch": epoch + 1
+            })
+            
+    wandb.finish()
 
 if __name__ == '__main__':
     train()
