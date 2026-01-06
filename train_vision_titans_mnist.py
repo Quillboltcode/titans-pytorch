@@ -9,6 +9,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from einops import rearrange
 from einops.layers.torch import Rearrange
+from tqdm import tqdm
 from titans_pytorch import MemoryAsContextTransformer
 
 class TitansImageGenerator(nn.Module):
@@ -166,7 +167,7 @@ def train(batch_size, epochs, lr, patch_size, dim, depth, dataset):
         model.train()
         total_loss = 0
         
-        for imgs, labels in loader:
+        for imgs, labels in tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}"):
             imgs, labels = imgs.to(device), labels.to(device)
             
             loss = model(imgs, labels)

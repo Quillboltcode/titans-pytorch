@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
+from tqdm import tqdm
 
 # -----------------------------------------------------------------------------
 # Memory Transformer Block (Strategy 2)
@@ -198,7 +199,7 @@ def train(batch_size, epochs, lr, dim):
         correct = 0
         total = 0
         
-        for imgs, labels in train_loader:
+        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1} Training"):
             imgs, labels = imgs.to(device), labels.to(device)
             
             optimizer.zero_grad()
@@ -223,7 +224,7 @@ def train(batch_size, epochs, lr, dim):
             correct = 0
             total = 0
             with torch.no_grad():
-                for imgs, labels in test_loader:
+                for imgs, labels in tqdm(test_loader, desc=f"Epoch {epoch+1} Validation"):
                     imgs, labels = imgs.to(device), labels.to(device)
                     logits = model(imgs)
                     loss = criterion(logits, labels)

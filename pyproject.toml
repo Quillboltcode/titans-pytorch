@@ -27,6 +27,7 @@ classifiers=[
 dependencies = [
     "assoc-scan",
     "axial_positional_embedding>=0.3.10",
+    "click>=8.1.8",
     "einops>=0.8.0",
     "einx>=0.3.0",
     "hyper-connections>=0.1.11",
@@ -35,7 +36,8 @@ dependencies = [
     "tensordict",
     "torch>=2.8",
     "tqdm",
-    "x-transformers"
+    "x-transformers",
+    "torchvision"
 ]
 
 [project.urls]

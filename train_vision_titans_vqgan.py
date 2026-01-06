@@ -10,6 +10,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from einops import rearrange
 from PIL import Image
+from tqdm import tqdm
 from titans_pytorch import MemoryAsContextTransformer
 
 # -----------------------------------------------------------------------------
@@ -368,7 +369,7 @@ def train(batch_size, kaggle_root, grad_accum_steps, epochs_vq, epochs_titans, l
         for epoch in range(epochs_vq):
             vqvae.train()
             total_loss = 0
-            for imgs, _ in loader:
+            for imgs, _ in tqdm(loader, desc=f"VQVAE Epoch {epoch+1}/{epochs_vq}"):
                 imgs = imgs.to(device)
                 loss, recon = vqvae(imgs)
                 recon_loss = F.mse_loss(recon, imgs)
@@ -411,7 +412,7 @@ def train(batch_size, kaggle_root, grad_accum_steps, epochs_vq, epochs_titans, l
         total_loss = 0
         optimizer.zero_grad()
         
-        for idx, (imgs, labels) in enumerate(loader):
+        for idx, (imgs, labels) in enumerate(tqdm(loader, desc=f"Titans Epoch {epoch+1}/{epochs_titans}")):
             imgs, labels = imgs.to(device), labels.to(device)
             
             with torch.amp.autocast('cuda'):

@@ -119,6 +119,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from einops import rearrange
+from tqdm import tqdm
 import click
 
 # Note: Ensure the TitansClassifier and MemoryAsContextTransformer 
@@ -205,7 +206,7 @@ def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, hea
         correct = 0
         total = 0
 
-        for batch_idx, (inputs, targets) in enumerate(train_loader):
+        for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} Training")):
             inputs, targets = inputs.to(device), targets.to(device)
             
             optimizer.zero_grad()
@@ -229,7 +230,7 @@ def train_cifar10(batch_size, epochs, learning_rate, patch_size, dim, depth, hea
         val_correct = 0
         val_total = 0
         with torch.no_grad():
-            for inputs, targets in test_loader:
+            for inputs, targets in tqdm(test_loader, desc=f"Epoch {epoch+1} Validation"):
                 inputs, targets = inputs.to(device), targets.to(device)
                 outputs = model(inputs)
                 _, predicted = outputs.max(1)
