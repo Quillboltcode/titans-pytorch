@@ -649,6 +649,7 @@ def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim,
         memory_chunk_size = memory_chunk_size
         checkpoint_path = checkpoint_path
         save_path = save_path
+    # checkout 
     print(Args()) 
     args = Args()
     
