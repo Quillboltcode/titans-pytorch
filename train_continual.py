@@ -512,7 +512,7 @@ def main_worker(rank, world_size, args):
         ).to(device)
         
         # Wrap with DDP
-        model = DDP(model, device_ids=[rank], output_device=rank)
+        model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
         
         if rank == 0:
             params = sum(p.numel() for p in model.parameters() if p.requires_grad)
