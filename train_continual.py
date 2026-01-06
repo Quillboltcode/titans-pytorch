@@ -636,7 +636,7 @@ def main_worker(rank, world_size, args):
 @click.option('--save_path', default='./checkpoints')
 def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim, 
          drop_path_rate, memory_chunk_size, checkpoint_path, save_path):
-    
+    print(model_type)
     class Args:
         model_type = model_type
         phase = phase
