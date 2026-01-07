@@ -486,6 +486,13 @@ def train(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim,
             'num_gpus': accelerator.num_processes,
         })
     
+    # Ensure dataset is downloaded on main process first to avoid race conditions
+    with accelerator.main_process_first():
+        if accelerator.is_main_process:
+            print("Checking/Downloading dataset...")
+        datasets.CIFAR10(root='./data', train=True, download=True)
+        datasets.CIFAR10(root='./data', train=False, download=True)
+    
     # Results tracking
     results = {
         'task_A_acc_phase1': None,

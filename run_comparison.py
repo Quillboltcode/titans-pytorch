@@ -43,13 +43,13 @@ def run_comparison(epochs_task_a, epochs_task_b, batch_size, lr, dim, num_gpus,
     }
     
     base_cmd = [
-        'python', 'train_continual.py',
+        'accelerate', 'launch', '--num_processes', str(num_gpus),
+        'train_continual.py',
         '--epochs_task_a', str(epochs_task_a),
         '--epochs_task_b', str(epochs_task_b),
         '--batch_size', str(batch_size),
         '--lr', str(lr),
         '--dim', str(dim),
-        '--num_gpus', str(num_gpus),
         '--phase', 'both',
     ]
     
