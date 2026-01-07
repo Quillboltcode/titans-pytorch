@@ -1,37 +1,27 @@
 """
-Continual Learning Experiment: Split CIFAR-10 with DDP
+Continual Learning Experiment: Split CIFAR-10 with Hugging Face Accelerate
 
 This script compares Standard ViT vs Memory ViT on class-incremental learning.
 - Task A: Classes 0-4 (airplane, automobile, bird, cat, deer)
 - Task B: Classes 5-9 (dog, frog, horse, ship, truck)
 
-Uses DistributedDataParallel (DDP) for multi-GPU training with proper memory state.
+Uses Hugging Face Accelerate for easy multi-GPU training.
 """
 
 import os
-import math
-import json
 import click
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
-from torch.utils.data.distributed import DistributedSampler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group
 from torchvision import datasets, transforms
 from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
 import wandb
-from types import SimpleNamespace
 
-def ddp_setup(rank, world_size):
-    """Initialize DDP process group."""
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
-    init_process_group(backend='nccl', rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+from accelerate import Accelerator
+from accelerate import DistributedDataParallelKwargs
 
 # -----------------------------------------------------------------------------
 # Helper: DropPath (Stochastic Depth)
@@ -272,7 +262,7 @@ class MemoryViT(nn.Module):
         for param in self.to_patch_embedding.parameters():
             param.requires_grad = False
         
-        if torch.distributed.get_rank() == 0:
+        if accelerator.is_main_process:
             print("Attention layers frozen. Memory modules and classification head remain trainable.")
 
 # -----------------------------------------------------------------------------
@@ -306,7 +296,7 @@ class SplitCIFAR10:
     def __getitem__(self, idx):
         return self.dataset[idx]
 
-def get_data_loaders(batch_size, task=None, rank=0, world_size=1):
+def get_data_loaders(batch_size, task=None):
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -326,24 +316,18 @@ def get_data_loaders(batch_size, task=None, rank=0, world_size=1):
         task_b_test = SplitCIFAR10(task='B', train=False, transform=transform_test, download=True)
         
         return {
-            'train_A': DataLoader(task_a, batch_size=batch_size, shuffle=False, 
-                                  sampler=DistributedSampler(task_a, rank=rank, shuffle=True)),
-            'test_A': DataLoader(task_a_test, batch_size=batch_size, shuffle=False,
-                                 sampler=DistributedSampler(task_a_test, rank=rank)),
-            'train_B': DataLoader(task_b, batch_size=batch_size, shuffle=False,
-                                  sampler=DistributedSampler(task_b, rank=rank, shuffle=True)),
-            'test_B': DataLoader(task_b_test, batch_size=batch_size, shuffle=False,
-                                 sampler=DistributedSampler(task_b_test, rank=rank)),
+            'train_A': DataLoader(task_a, batch_size=batch_size, shuffle=True, num_workers=2),
+            'test_A': DataLoader(task_a_test, batch_size=batch_size, shuffle=False, num_workers=2),
+            'train_B': DataLoader(task_b, batch_size=batch_size, shuffle=True, num_workers=2),
+            'test_B': DataLoader(task_b_test, batch_size=batch_size, shuffle=False, num_workers=2),
         }
     else:
         task_dataset = SplitCIFAR10(task=task, train=True, transform=transform_train, download=True)
         task_test = SplitCIFAR10(task=task, train=False, transform=transform_test, download=True)
         
         return {
-            'train': DataLoader(task_dataset, batch_size=batch_size, shuffle=False,
-                               sampler=DistributedSampler(task_dataset, rank=rank, shuffle=True)),
-            'test': DataLoader(task_test, batch_size=batch_size, shuffle=False,
-                              sampler=DistributedSampler(task_test, rank=rank)),
+            'train': DataLoader(task_dataset, batch_size=batch_size, shuffle=True, num_workers=2),
+            'test': DataLoader(task_test, batch_size=batch_size, shuffle=False, num_workers=2),
         }
 
 # -----------------------------------------------------------------------------
@@ -377,24 +361,36 @@ def create_model(model_type, num_classes, image_size=32, patch_size=4, dim=192, 
         raise ValueError(f"Unknown model_type: {model_type}")
 
 # -----------------------------------------------------------------------------
+# Global Accelerator
+# -----------------------------------------------------------------------------
+
+accelerator = None
+
+def init_accelerator():
+    """Initialize the Accelerator."""
+    global accelerator
+    # Use DistributedDataParallelKwargs for proper DDP
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    return accelerator
+
+# -----------------------------------------------------------------------------
 # Training Functions
 # -----------------------------------------------------------------------------
 
-def train_epoch(model, train_loader, optimizer, criterion, device, rank, epoch, world_size):
+def train_epoch(model, train_loader, optimizer, criterion, epoch):
     model.train()
     total_loss = 0
     correct = 0
     total = 0
     
-    train_loader.sampler.set_epoch(epoch)  # For DDP
-    
-    for imgs, labels in tqdm(train_loader, desc="Training", leave=False, disable=rank != 0):
-        imgs, labels = imgs.to(device), labels.to(device)
+    for imgs, labels in tqdm(train_loader, desc="Training", leave=False, disable=not accelerator.is_main_process):
+        imgs, labels = imgs.to(accelerator.device), labels.to(accelerator.device)
         
         optimizer.zero_grad()
         logits = model(imgs)
         loss = criterion(logits, labels)
-        loss.backward()
+        accelerator.backward(loss)
         optimizer.step()
         
         total_loss += loss.item()
@@ -402,87 +398,92 @@ def train_epoch(model, train_loader, optimizer, criterion, device, rank, epoch, 
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
     
-    # Sync metrics across processes
-    metrics = torch.tensor([total_loss / len(train_loader), 100. * correct / total]).to(device)
-    torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
-    metrics /= world_size
-    
-    return metrics[0].item(), metrics[1].item()
+    return total_loss / len(train_loader), 100. * correct / total
 
-def evaluate(model, test_loader, device, rank, world_size):
+def evaluate(model, test_loader):
     model.eval()
     total_loss = 0
     correct = 0
     total = 0
     criterion = nn.CrossEntropyLoss()
     
-    test_loader.sampler.set_epoch(0)  # For DDP
+    # Prepare loader for distributed evaluation
+    test_loader = accelerator.prepare(test_loader)
     
     with torch.no_grad():
-        for imgs, labels in tqdm(test_loader, desc="Evaluating", leave=False, disable=rank != 0):
-            imgs, labels = imgs.to(device), labels.to(device)
+        for imgs, labels in tqdm(test_loader, desc="Evaluating", leave=False, disable=not accelerator.is_main_process):
+            # imgs, labels are already on device
             logits = model(imgs)
             loss = criterion(logits, labels)
             
             total_loss += loss.item()
-            _, predicted = logits.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
+            
+            # Gather predictions and labels
+            predictions = logits.argmax(dim=-1)
+            gathered_preds = accelerator.gather_for_metrics(predictions)
+            gathered_labels = accelerator.gather_for_metrics(labels)
+            
+            correct += gathered_preds.eq(gathered_labels).sum().item()
+            total += gathered_labels.size(0)
     
-    # Sync metrics
-    metrics = torch.tensor([total_loss / len(test_loader), 100. * correct / total]).to(device)
-    torch.distributed.all_reduce(metrics, op=torch.distributed.ReduceOp.SUM)
-    metrics /= world_size
-    
-    return metrics[0].item(), metrics[1].item()
+    return total_loss / len(test_loader), 100. * correct / total
 
-def train_phase(rank, world_size, model, train_loader, test_loader, task_name, epochs, lr, device):
+def train_phase(model, train_loader, test_loader, task_name, epochs, lr):
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    
+    # Prepare with accelerator
+    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, test_loader, scheduler
+    )
+    
     criterion = nn.CrossEntropyLoss()
     
     best_acc = 0
     for epoch in range(epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device, rank, epoch, world_size)
+        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, epoch)
         scheduler.step()
         
-        if (epoch + 1) % 10 == 0 and rank == 0:
-            val_loss, val_acc = evaluate(model, test_loader, device, rank, world_size)
-            if val_acc > best_acc:
-                best_acc = val_acc
-            print(f"  Epoch {epoch+1}/{epochs} | {task_name} Loss: {val_loss:.4f} | {task_name} Acc: {val_acc:.2f}%")
+        if (epoch + 1) % 10 == 0:
+            val_loss, val_acc = evaluate(model, test_loader)
             
-            wandb.log({
-                f'{task_name}/train_loss': train_loss,
-                f'{task_name}/train_acc': train_acc,
-                f'{task_name}/val_loss': val_loss,
-                f'{task_name}/val_acc': val_acc,
-            })
+            if accelerator.is_main_process:
+                if val_acc > best_acc:
+                    best_acc = val_acc
+                print(f"  Epoch {epoch+1}/{epochs} | {task_name} Loss: {val_loss:.4f} | {task_name} Acc: {val_acc:.2f}%")
+                
+                wandb.log({
+                    f'{task_name}/train_loss': train_loss,
+                    f'{task_name}/train_acc': train_acc,
+                    f'{task_name}/val_loss': val_loss,
+                    f'{task_name}/val_acc': val_acc,
+                })
     
-    return best_acc
+    return model, best_acc
 
 # -----------------------------------------------------------------------------
-# Main Training Function (run on each process)
+# Main Training Function
 # -----------------------------------------------------------------------------
 
-def main_worker(rank, world_size, args):
-    # Setup DDP
-    ddp_setup(rank, world_size)
-    device = rank
+def train(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim, 
+          drop_path_rate, memory_chunk_size, save_path):
     
-    # Initialize wandb only on rank 0
-    if rank == 0:
-        wandb.init(project='continual-learning-splits', name=f'{args.model_type}_split_cifar10')
+    global accelerator
+    accelerator = init_accelerator()
+    
+    # Initialize wandb only on main process
+    if accelerator.is_main_process:
+        wandb.init(project='continual-learning-splits', name=f'{model_type}_split_cifar10')
         wandb.config.update({
-            'model_type': args.model_type,
-            'epochs_task_a': args.epochs_task_a,
-            'epochs_task_b': args.epochs_task_b,
-            'batch_size': args.batch_size,
-            'learning_rate': args.lr,
-            'dim': args.dim,
-            'drop_path_rate': args.drop_path_rate,
-            'memory_chunk_size': args.memory_chunk_size,
-            'num_gpus': world_size,
+            'model_type': model_type,
+            'epochs_task_a': epochs_task_a,
+            'epochs_task_b': epochs_task_b,
+            'batch_size': batch_size,
+            'learning_rate': lr,
+            'dim': dim,
+            'drop_path_rate': drop_path_rate,
+            'memory_chunk_size': memory_chunk_size,
+            'num_gpus': accelerator.num_processes,
         })
     
     # Results tracking
@@ -496,46 +497,43 @@ def main_worker(rank, world_size, args):
     # =========================================================================
     # Phase 1: Train on Task A (Classes 0-4)
     # =========================================================================
-    if args.phase in ['1', 'both']:
-        if rank == 0:
+    if phase in ['1', 'both']:
+        if accelerator.is_main_process:
             print("\n" + "="*60)
             print("Phase 1: Training on Task A (Classes 0-4)")
             print("="*60)
         
         num_classes_A = 5
         model = create_model(
-            model_type=args.model_type,
+            model_type=model_type,
             num_classes=num_classes_A,
-            dim=args.dim,
-            drop_path_rate=args.drop_path_rate,
-            memory_chunk_size=args.memory_chunk_size
-        ).to(device)
+            dim=dim,
+            drop_path_rate=drop_path_rate,
+            memory_chunk_size=memory_chunk_size
+        )
         
-        # Wrap with DDP
-        model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
-        
-        if rank == 0:
+        if accelerator.is_main_process:
             params = sum(p.numel() for p in model.parameters() if p.requires_grad)
             print(f"Total Parameters: {params:,}")
         
         # Get data loaders for Task A
-        loaders_A = get_data_loaders(args.batch_size, task='A', rank=rank, world_size=world_size)
+        loaders_A = get_data_loaders(batch_size, task='A')
         
         # Train on Task A
-        best_acc_A = train_phase(
-            rank, world_size, model, loaders_A['train'], loaders_A['test'], 
-            'task_A_phase1', args.epochs_task_a, args.lr, device
+        model, best_acc_A = train_phase(
+            model, loaders_A['train'], loaders_A['test'], 
+            'task_A_phase1', epochs_task_a, lr
         )
         
         results['task_A_acc_phase1'] = best_acc_A
-        if rank == 0:
+        if accelerator.is_main_process:
             print(f"\nTask A Best Validation Accuracy: {best_acc_A:.2f}%")
             
             # Save checkpoint
-            os.makedirs(args.save_path, exist_ok=True)
-            checkpoint_A_path = os.path.join(args.save_path, f'{args.model_type}_phase1_taskA.pth')
-            torch.save({
-                'model_state_dict': model.state_dict(),
+            os.makedirs(save_path, exist_ok=True)
+            checkpoint_A_path = os.path.join(save_path, f'{model_type}_phase1_taskA.pth')
+            accelerator.save({
+                'model_state_dict': accelerator.unwrap_model(model).state_dict(),
                 'num_classes': num_classes_A,
                 'results': results,
             }, checkpoint_A_path)
@@ -544,50 +542,53 @@ def main_worker(rank, world_size, args):
     # =========================================================================
     # Phase 2: Train on Task B (Classes 5-9)
     # =========================================================================
-    if args.phase in ['2', 'both']:
-        if rank == 0:
+    if phase in ['2', 'both']:
+        if accelerator.is_main_process:
             print("\n" + "="*60)
             print("Phase 2: Training on Task B (Classes 5-9)")
             print("="*60)
         
+        # Unwrap model for modification and re-preparation
+        unwrapped_model = accelerator.unwrap_model(model)
+
         # For Memory ViT: Freeze attention layers
-        if args.model_type == 'memory':
-            model.module.freeze_attention()
+        if model_type == 'memory':
+            unwrapped_model.freeze_attention()
         
         # Replace classification head for Task B
         num_classes_B = 5
-        model.module.to_logits = nn.Linear(args.dim, num_classes_B).to(device)
+        unwrapped_model.to_logits = nn.Linear(dim, num_classes_B)
         
         # Get data loaders for Task B
-        loaders_B = get_data_loaders(args.batch_size, task='B', rank=rank, world_size=world_size)
-        loaders_A_test = get_data_loaders(args.batch_size, task='A', rank=rank, world_size=world_size)
+        loaders_B = get_data_loaders(batch_size, task='B')
+        loaders_A_test = get_data_loaders(batch_size, task='A')
         
-        if rank == 0:
+        if accelerator.is_main_process:
             print("\nTraining on Task B...")
         
-        train_phase(
-            rank, world_size, model, loaders_B['train'], loaders_B['test'],
-            'task_B_phase2', args.epochs_task_b, args.lr, device
+        model, _ = train_phase(
+            unwrapped_model, loaders_B['train'], loaders_B['test'],
+            'task_B_phase2', epochs_task_b, lr
         )
         
         # Evaluate on Task B
-        if rank == 0:
+        if accelerator.is_main_process:
             print("\nEvaluating on Task B...")
-        _, task_B_acc = evaluate(model, loaders_B['test'], device, rank, world_size)
+        _, task_B_acc = evaluate(model, loaders_B['test'])
         results['task_B_acc'] = task_B_acc
-        if rank == 0:
+        if accelerator.is_main_process:
             print(f"Task B Accuracy: {task_B_acc:.2f}%")
         
         # Evaluate on Task A (measuring forgetting)
-        if rank == 0:
+        if accelerator.is_main_process:
             print("\nEvaluating on Task A (measuring forgetting)...")
-        _, task_A_acc_phase2 = evaluate(model, loaders_A_test['test'], device, rank, world_size)
+        _, task_A_acc_phase2 = evaluate(model, loaders_A_test['test'])
         results['task_A_acc_phase2'] = task_A_acc_phase2
         
         forgetting = results['task_A_acc_phase1'] - results['task_A_acc_phase2']
         results['forgetting'] = forgetting
         
-        if rank == 0:
+        if accelerator.is_main_process:
             print("\n" + "="*60)
             print("RESULTS SUMMARY")
             print("="*60)
@@ -605,19 +606,17 @@ def main_worker(rank, world_size, args):
             })
             
             # Save final checkpoint
-            checkpoint_final_path = os.path.join(args.save_path, f'{args.model_type}_final.pth')
-            torch.save({
-                'model_state_dict': model.state_dict(),
+            checkpoint_final_path = os.path.join(save_path, f'{model_type}_final.pth')
+            accelerator.save({
+                'model_state_dict': accelerator.unwrap_model(model).state_dict(),
                 'num_classes': num_classes_B,
                 'results': results,
             }, checkpoint_final_path)
             print(f"\nFinal checkpoint saved to {checkpoint_final_path}")
     
-    if rank == 0:
+    if accelerator.is_main_process:
         wandb.finish()
         print("\nExperiment complete!")
-    
-    destroy_process_group()
 
 # -----------------------------------------------------------------------------
 # CLI Entry Point
@@ -633,13 +632,17 @@ def main_worker(rank, world_size, args):
 @click.option('--dim', default=192)
 @click.option('--drop_path_rate', default=0.1)
 @click.option('--memory_chunk_size', default=64)
-@click.option('--checkpoint_path', default=None)
 @click.option('--save_path', default='./checkpoints')
 def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim, 
-         drop_path_rate, memory_chunk_size, checkpoint_path, save_path):
+         drop_path_rate, memory_chunk_size, save_path):
     
-    # Create args object for main_worker using SimpleNamespace
-    args = SimpleNamespace(
+    if accelerator is None:
+        init_accelerator()
+    
+    if accelerator.is_main_process:
+        print(f"Starting training with {accelerator.num_processes} processes")
+    
+    train(
         model_type=model_type,
         phase=phase,
         epochs_task_a=epochs_task_a,
@@ -649,20 +652,7 @@ def main(model_type, phase, epochs_task_a, epochs_task_b, batch_size, lr, dim,
         dim=dim,
         drop_path_rate=drop_path_rate,
         memory_chunk_size=memory_chunk_size,
-        checkpoint_path=checkpoint_path,
         save_path=save_path
-    )
-    
-    # Detect number of GPUs
-    world_size = torch.cuda.device_count()
-    print(f"Starting DDP training with {world_size} GPUs")
-    
-    # Launch DDP processes
-    torch.multiprocessing.spawn(
-        main_worker,
-        args=(world_size, args),
-        nprocs=world_size,
-        join=True
     )
 
 if __name__ == '__main__':
