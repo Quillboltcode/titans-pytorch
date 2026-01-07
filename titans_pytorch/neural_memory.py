@@ -538,6 +538,9 @@ class NeuralMemory(Module):
 
         self.register_buffer('zero', torch.tensor(0.), persistent = False)
 
+        # visualization hook for debugging and analysis
+        self._visualization_hook = None
+
     @property
     def memory_model_parameter_dict(self):
         return TensorDict(dict(zip(self.memory_model_parameter_names, self.memory_model_parameters)))
@@ -1062,6 +1065,19 @@ class NeuralMemory(Module):
 
         if detach_mem_state:
             next_neural_mem_state = mem_state_detach(next_neural_mem_state)
+
+        # visualization hook for capturing intermediate values
+        if self._visualization_hook is not None:
+            viz_data = {
+                'retrieve_seq': retrieve_seq,
+                'queries': self.to_queries(self.retrieve_norm(retrieve_seq)),
+                'weights': weights,
+                'retrieved': retrieved,
+                'surprises': surprises[0] if return_surprises else None,
+                'adaptive_lr': surprises[1] if return_surprises else None,
+                'state': next_neural_mem_state,
+            }
+            self._visualization_hook(viz_data)
 
         # returning
 
