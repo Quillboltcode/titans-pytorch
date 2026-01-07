@@ -370,7 +370,7 @@ def init_accelerator():
     """Initialize the Accelerator."""
     global accelerator
     # Use DistributedDataParallelKwargs for proper DDP
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=False)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     return accelerator
 
