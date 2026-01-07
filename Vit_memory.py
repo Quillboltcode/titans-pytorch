@@ -10,6 +10,7 @@ from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
 import wandb
+from accelerate import Accelerator
 
 # -----------------------------------------------------------------------------
 # Helper: DropPath (Stochastic Depth)
@@ -181,17 +182,19 @@ class MemoryViT(nn.Module):
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Training on {device}")
+    accelerator = Accelerator()
+    device = accelerator.device
     
-    wandb.init(project=wandb_project, config={
-        "learning_rate": lr,
-        "epochs": epochs,
-        "batch_size": batch_size,
-        "dim": dim,
-        "drop_path_rate": drop_path_rate,
-        "architecture": "MemoryViT"
-    })
+    if accelerator.is_main_process:
+        print(f"Training on {device}")
+        wandb.init(project=wandb_project, config={
+            "learning_rate": lr,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "dim": dim,
+            "drop_path_rate": drop_path_rate,
+            "architecture": "MemoryViT"
+        })
     
     # Augmentation is key for CIFAR
     transform_train = transforms.Compose([
@@ -222,15 +225,20 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
         heads=3,
         memory_chunk_size=64, # 8x8 patches + 1 CLS = 65, so chunk 64 is perfect
         drop_path_rate=drop_path_rate
-    ).to(device)
+    )
     
     # Count parameters
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total Parameters: {params:,}")
+    if accelerator.is_main_process:
+        params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Total Parameters: {params:,}")
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.CrossEntropyLoss()
+    
+    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, test_loader, scheduler
+    )
     
     for epoch in range(epochs):
         model.train()
@@ -238,13 +246,12 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
         correct = 0
         total = 0
         
-        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1} Training"):
-            imgs, labels = imgs.to(device), labels.to(device)
+        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1} Training", disable=not accelerator.is_main_process):
             
             optimizer.zero_grad()
             logits = model(imgs)
             loss = criterion(logits, labels)
-            loss.backward()
+            accelerator.backward(loss)
             optimizer.step()
             
             total_loss += loss.item()
@@ -253,14 +260,16 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
             correct += predicted.eq(labels).sum().item()
             
         scheduler.step()
-        acc = 100. * correct / total
-        print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.2f}%")
         
-        wandb.log({
-            "train_loss": total_loss/len(train_loader),
-            "train_acc": acc,
-            "epoch": epoch + 1
-        })
+        if accelerator.is_main_process:
+            acc = 100. * correct / total
+            print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.2f}%")
+            
+            wandb.log({
+                "train_loss": total_loss/len(train_loader),
+                "train_acc": acc,
+                "epoch": epoch + 1
+            })
         
         # Validation
         if (epoch + 1) % 5 == 0:
@@ -269,22 +278,28 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
             correct = 0
             total = 0
             with torch.no_grad():
-                for imgs, labels in tqdm(test_loader, desc=f"Epoch {epoch+1} Validation"):
-                    imgs, labels = imgs.to(device), labels.to(device)
+                for imgs, labels in tqdm(test_loader, desc=f"Epoch {epoch+1} Validation", disable=not accelerator.is_main_process):
                     logits = model(imgs)
                     loss = criterion(logits, labels)
                     test_loss += loss.item()
-                    _, predicted = logits.max(1)
-                    total += labels.size(0)
-                    correct += predicted.eq(labels).sum().item()
-            print(f"--> Test Loss: {test_loss/len(test_loader):.4f} | Test Acc: {100.*correct/total:.2f}%")
-            wandb.log({
-                "test_loss": test_loss/len(test_loader),
-                "test_acc": 100.*correct/total,
-                "epoch": epoch + 1
-            })
+                    
+                    # Gather predictions and labels for accurate metrics across GPUs
+                    predictions = logits.argmax(dim=-1)
+                    gathered_preds, gathered_labels = accelerator.gather_for_metrics((predictions, labels))
+                    
+                    total += gathered_labels.size(0)
+                    correct += gathered_preds.eq(gathered_labels).sum().item()
             
-    wandb.finish()
+            if accelerator.is_main_process:
+                print(f"--> Test Loss: {test_loss/len(test_loader):.4f} | Test Acc: {100.*correct/total:.2f}%")
+                wandb.log({
+                    "test_loss": test_loss/len(test_loader),
+                    "test_acc": 100.*correct/total,
+                    "epoch": epoch + 1
+                })
+            
+    if accelerator.is_main_process:
+        wandb.finish()
 
 if __name__ == '__main__':
     train()
