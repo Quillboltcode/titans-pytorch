@@ -204,7 +204,7 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
     transform_train = transforms.Compose([
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
-        timm.data.auto_augment.RandAugment(),
+        timm.data.auto_augment.rand_augment_transform('rand-m9-mstd0.5-n2', hparams={'translate_const': 117, 'img_mean': (124, 116, 104)}),
         transforms.ToTensor(),
         transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
