@@ -11,6 +11,7 @@ from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
 import wandb
 from accelerate import Accelerator, DistributedDataParallelKwargs
+import timm
 
 # -----------------------------------------------------------------------------
 # Helper: DropPath (Stochastic Depth)
@@ -91,13 +92,13 @@ class MemoryFFNTransformerBlock(nn.Module):
 class MemoryViT(nn.Module):
     def __init__(
         self,
-        image_size = 32,
-        patch_size = 4,
+        image_size = 224,
+        patch_size = 16,
         num_classes = 10,
         dim = 192,           # Small dimension for CIFAR
         depth = 6,
         heads = 3,
-        memory_chunk_size = 64, # Equal to sequence length (8*8)
+        memory_chunk_size = 196, # Equal to sequence length (14*14)
         drop_path_rate = 0.
     ):
         super().__init__()
@@ -176,7 +177,7 @@ class MemoryViT(nn.Module):
 
 @click.command()
 @click.option('--batch_size', default=64, help='Batch size')
-@click.option('--epochs', default=50, help='Number of epochs')
+@click.option('--epochs', default=100, help='Number of epochs')
 @click.option('--lr', default=3e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
@@ -197,24 +198,28 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
             "architecture": "MemoryViT"
         })
     
-    # Augmentation is key for CIFAR
+    # Augmentation for 224x224 images with Rand-Augment
     transform_train = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
+        transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
+        timm.data.auto_augment.RandAugment(),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
 
     transform_test = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
         transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
     ])
     
     if accelerator.is_main_process:
         datasets.CIFAR10(root='./data', train=True, download=True)
         datasets.CIFAR10(root='./data', train=False, download=True)
     accelerator.wait_for_everyone()
-    
+
+    # Note: CIFAR10 images are 32x32, but we are resizing them to 224x224 for this experiment
     trainset = datasets.CIFAR10(root='./data', train=True, download=False, transform=transform_train)
     testset = datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
     
@@ -223,13 +228,13 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
     
     # Model
     model = MemoryViT(
-        image_size=32,
-        patch_size=4,
+        image_size=224,
+        patch_size=16,
         num_classes=10,
         dim=dim,
         depth=6,
         heads=3,
-        memory_chunk_size=64, # 8x8 patches + 1 CLS = 65, so chunk 64 is perfect
+        memory_chunk_size=196, # 14x14 patches + 1 CLS = 197, so chunk 196 is perfect
         drop_path_rate=drop_path_rate
     )
     
@@ -239,11 +244,19 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
         print(f"Total Parameters: {params:,}")
     
     optimizer = optim.AdamW(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-    criterion = nn.CrossEntropyLoss()
     
-    model, optimizer, train_loader, test_loader, scheduler = accelerator.prepare(
-        model, optimizer, train_loader, test_loader, scheduler
+    # Warm-up scheduler for the first 5 epochs
+    warmup_epochs = 5
+    warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
+    
+    # Main scheduler after warm-up
+    main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
+    
+    # Use timm's SoftTargetCrossEntropy for label smoothing
+    criterion = timm.loss.SoftTargetCrossEntropy()
+    
+    model, optimizer, train_loader, test_loader = accelerator.prepare(
+        model, optimizer, train_loader, test_loader
     )
     
     for epoch in range(epochs):
@@ -265,7 +278,11 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
             
-        scheduler.step()
+        # Handle warm-up and main schedulers
+        if epoch < warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            main_scheduler.step()
         
         if accelerator.is_main_process:
             acc = 100. * correct / total
