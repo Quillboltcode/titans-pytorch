@@ -10,7 +10,7 @@ from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
 import wandb
-from accelerate import Accelerator
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 # -----------------------------------------------------------------------------
 # Helper: DropPath (Stochastic Depth)
@@ -182,7 +182,8 @@ class MemoryViT(nn.Module):
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
-    accelerator = Accelerator()
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     device = accelerator.device
     
     if accelerator.is_main_process:
