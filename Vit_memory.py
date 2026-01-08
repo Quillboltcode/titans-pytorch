@@ -209,8 +209,13 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
     ])
     
-    trainset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-    testset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
+    if accelerator.is_main_process:
+        datasets.CIFAR10(root='./data', train=True, download=True)
+        datasets.CIFAR10(root='./data', train=False, download=True)
+    accelerator.wait_for_everyone()
+    
+    trainset = datasets.CIFAR10(root='./data', train=True, download=False, transform=transform_train)
+    testset = datasets.CIFAR10(root='./data', train=False, download=False, transform=transform_test)
     
     train_loader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2)
     test_loader = DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
