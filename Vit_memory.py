@@ -264,8 +264,8 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
     # Main scheduler after warm-up
     main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
 
-    # Use timm's SoftTargetCrossEntropy for label smoothing
-    criterion = timm.loss.SoftTargetCrossEntropy()
+    # Use CrossEntropyLoss with label smoothing
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     model, optimizer, train_loader, test_loader = accelerator.prepare(
         model, optimizer, train_loader, test_loader
