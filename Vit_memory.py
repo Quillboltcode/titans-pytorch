@@ -182,7 +182,9 @@ class MemoryViT(nn.Module):
 @click.option('--dim', default=192, help='Model dimension')
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
-def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
+@click.option('--resume', default=None, help='Path to checkpoint to resume training')
+@click.option('--gradient_accumulation_steps', default=1, help='Number of steps for gradient accumulation')
+def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gradient_accumulation_steps):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     device = accelerator.device
@@ -237,24 +239,34 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
         memory_chunk_size=196, # 14x14 patches + 1 CLS = 197, so chunk 196 is perfect
         drop_path_rate=drop_path_rate
     )
-    
+
     # Count parameters
     if accelerator.is_main_process:
         params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Total Parameters: {params:,}")
-    
+
     optimizer = optim.AdamW(model.parameters(), lr=lr)
-    
+
+    # Load checkpoint if resuming training
+    start_epoch = 0
+    if resume:
+        checkpoint = torch.load(resume)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        if accelerator.is_main_process:
+            print(f"Resuming training from epoch {start_epoch}")
+
     # Warm-up scheduler for the first 5 epochs
     warmup_epochs = 5
     warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
-    
+
     # Main scheduler after warm-up
     main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
-    
+
     # Use timm's SoftTargetCrossEntropy for label smoothing
     criterion = timm.loss.SoftTargetCrossEntropy()
-    
+
     model, optimizer, train_loader, test_loader = accelerator.prepare(
         model, optimizer, train_loader, test_loader
     )
@@ -265,13 +277,16 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
         correct = 0
         total = 0
         
-        for imgs, labels in tqdm(train_loader, desc=f"Epoch {epoch+1} Training", disable=not accelerator.is_main_process):
+        for step, (imgs, labels) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1} Training", disable=not accelerator.is_main_process)):
             
-            optimizer.zero_grad()
             logits = model(imgs)
             loss = criterion(logits, labels)
             accelerator.backward(loss)
-            optimizer.step()
+            
+            # Gradient accumulation
+            if (step + 1) % gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
             
             total_loss += loss.item()
             _, predicted = logits.max(1)
@@ -293,6 +308,18 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project):
                 "train_acc": acc,
                 "epoch": epoch + 1
             })
+        
+        # Save checkpoint every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            if accelerator.is_main_process:
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': accelerator.get_state_dict(model),
+                    'optimizer_state_dict': accelerator.get_state_dict(optimizer),
+                }
+                checkpoint_path = f"checkpoint_epoch_{epoch+1}.pt"
+                torch.save(checkpoint, checkpoint_path)
+                print(f"Saved checkpoint to {checkpoint_path}")
         
         # Validation
         if (epoch + 1) % 5 == 0:
