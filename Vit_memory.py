@@ -247,16 +247,6 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
 
     optimizer = optim.AdamW(model.parameters(), lr=lr)
 
-    # Load checkpoint if resuming training
-    start_epoch = 0
-    if resume:
-        checkpoint = torch.load(resume)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch'] + 1
-        if accelerator.is_main_process:
-            print(f"Resuming training from epoch {start_epoch}")
-
     # Warm-up scheduler for the first 5 epochs
     warmup_epochs = 5
     warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
@@ -271,7 +261,22 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
         model, optimizer, train_loader, test_loader
     )
     
-    for epoch in range(epochs):
+    # Register schedulers for checkpointing
+    accelerator.register_for_checkpointing(warmup_scheduler)
+    accelerator.register_for_checkpointing(main_scheduler)
+
+    # Load checkpoint if resuming training
+    start_epoch = 0
+    if resume:
+        accelerator.load_state(resume)
+        try:
+            start_epoch = int(os.path.basename(os.path.normpath(resume)).split('_')[-1])
+        except (ValueError, IndexError):
+            pass
+        if accelerator.is_main_process:
+            print(f"Resuming training from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, epochs):
         model.train()
         total_loss = 0
         correct = 0
@@ -310,15 +315,10 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
             })
         
         # Save checkpoint every 10 epochs
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 10 == 0 or (epoch + 1) == 1:
+            checkpoint_path = f"checkpoint_epoch_{epoch+1}"
+            accelerator.save_state(checkpoint_path)
             if accelerator.is_main_process:
-                checkpoint = {
-                    'epoch': epoch,
-                    'model_state_dict': accelerator.get_state_dict(model),
-                    'optimizer_state_dict': accelerator.get_state_dict(optimizer),
-                }
-                checkpoint_path = f"checkpoint_epoch_{epoch+1}.pt"
-                torch.save(checkpoint, checkpoint_path)
                 print(f"Saved checkpoint to {checkpoint_path}")
         
         # Validation
