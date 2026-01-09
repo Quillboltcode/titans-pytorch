@@ -178,7 +178,7 @@ class MemoryViT(nn.Module):
 @click.command()
 @click.option('--batch_size', default=64, help='Batch size')
 @click.option('--epochs', default=100, help='Number of epochs')
-@click.option('--lr', default=3e-4, help='Learning rate')
+@click.option('--lr', default=1e-3, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
@@ -245,10 +245,10 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
         params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"Total Parameters: {params:,}")
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
 
     # Warm-up scheduler for the first 5 epochs
-    warmup_epochs = 5
+    warmup_epochs = 2
     warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
 
     # Main scheduler after warm-up
