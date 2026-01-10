@@ -183,7 +183,7 @@ class MemoryViT(nn.Module):
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 @click.option('--resume', default=None, help='Path to checkpoint to resume training')
-@click.option('--gradient_accumulation_steps', default=1, help='Number of steps for gradient accumulation')
+@click.option('--gradient_accumulation_steps', default=4, help='Number of steps for gradient accumulation')
 def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gradient_accumulation_steps):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
@@ -273,8 +273,25 @@ def train(batch_size, epochs, lr, dim, drop_path_rate, wandb_project, resume, gr
             start_epoch = int(os.path.basename(os.path.normpath(resume)).split('_')[-1])
         except (ValueError, IndexError):
             pass
+        
+        # Update learning rate and re-init schedulers for new hyperparameters
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+            param_group['initial_lr'] = lr
+            
+        # Re-initialize schedulers to respect new epochs and lr
+        warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
+        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
+        
+        # Fast-forward main scheduler if past warmup
+        if start_epoch > warmup_epochs:
+            # We don't need to step warmup_scheduler as it's done
+            for _ in range(start_epoch - warmup_epochs):
+                main_scheduler.step()
+
         if accelerator.is_main_process:
             print(f"Resuming training from epoch {start_epoch}")
+            print(f"Hyperparameters updated: LR={lr}, Epochs={epochs}")
 
     for epoch in range(start_epoch, epochs):
         model.train()
