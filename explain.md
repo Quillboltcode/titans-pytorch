@@ -2,11 +2,17 @@ The NeuralMemory class in `titans_pytorch/neural_memory.py` implements a dynamic
 
 ### Key Architectural Components
 
+The NeuralMemory is a model-within-a-model.
+
+Outer Model: The main Transformer/Network. It learns how to update the memory.
+Inner Model (Memory): A small MLP (Multi-Layer Perceptron) whose weights are the memory.
+
 1. **Memory Model (Core Storage)**:
    - The memory is represented by a small MLP (Multi-Layer Perceptron), defaulting to `MemoryMLP` from `memory_models.py`.
    - `MemoryMLP` is a simple feedforward network with configurable depth (default 2 layers), expansion factor (default 4x hidden dimension), and Xavier-initialized weights. It takes inputs (keys) and produces outputs (values) via matrix multiplications and GeLU activations.
    - The MLP's parameters (weights) are the "memory" — they encode learned associations between keys and values. This is analogous to fast weights in linear attention or Schmidhuber's work, where the network acts as a differentiable associative memory.
    - Optionally wrapped in `ResidualNorm` for normalization and residual connections, as in the TTT paper.
+
 
 2. **Multi-Head Support**:
    - Supports multiple heads (default 1) for parallel processing, similar to multi-head attention.
@@ -94,4 +100,62 @@ Retrieval is a simple forward pass: queries fetch stored values via the MLP.
 - **Integration**: Used in transformers (e.g., in `mac_transformer.py` or `implicit_mlp_attention.py`) for memory-augmented attention.
 - **Limitations**: Requires careful tuning of chunk sizes, learning rates, and batch sizes; can be computationally intensive for large memories.
 
-This architecture enables transformers to "remember" across long contexts dynamically, improving performance on tasks like language modeling or reasoning. If you need details on specific methods, equations (e.g., from the TTT paper), or code examples, let me know!
+This architecture enables transformers to "remember" across long contexts dynamically, improving performance on tasks like language modeling or reasoning.
+
+### Detailed Layer-by-Layer Execution
+
+To understand the implementation in `titans_pytorch/neural_memory.py`, here is a breakdown of the specific layers and the flow of data during the forward and backward passes.
+
+#### 1. Layer Definitions (`__init__`)
+
+*   **The Memory Core (`self.memory_model`)**:
+    *   **Code**: `self.memory_model = MemoryMLP(...)`
+    *   **Role**: This is the storage container. Unlike a standard KV-cache which stores raw tensors, this stores information in the **weights** of this MLP.
+    *   **Structure**: Typically a 2-layer MLP with GELU activation.
+
+*   **The Projections (The "Learner")**:
+    *   `self.to_keys` & `self.to_values`: Projects the input sequence into training data ($K, V$) for the Memory MLP.
+    *   `self.to_queries`: Projects the input sequence into queries ($Q$) to ask the Memory MLP.
+    *   `self.to_adaptive_step`: Predicts a learning rate ($\eta$) for every token. Determines "how much to learn from this token".
+    *   `self.to_decay_factor`: Predicts a decay rate ($\alpha$). Determines "how much to forget previous memories".
+    *   `self.to_momentum`: Predicts momentum to smooth out updates.
+
+*   **The Optimizer (`self.per_sample_grad_fn`)**:
+    *   **Code**: `vmap(grad(forward_and_loss))`
+    *   **Role**: A differentiable optimizer. It calculates the gradient of the Memory MLP's loss with respect to its weights. This gradient is the "surprise" signal used to update the memory.
+
+#### 2. The Forward Pass (Execution)
+
+When data enters `NeuralMemory.forward`, two distinct processes occur: **Storing** (Training the inner model) and **Retrieving** (Inference on the inner model).
+
+**Step A: Storing Memories (`store_memories`)**
+This phase updates the weights of the Memory MLP based on the input sequence.
+1.  **Generate Training Data**: Input `seq` is projected to Keys ($K$) and Values ($V$). Adaptive learning rates and decay factors are computed.
+2.  **Calculate "Surprise" (Gradient Descent)**:
+    *   The model treats $K$ as input and $V$ as the target.
+    *   It runs the *current* Memory MLP on $K$.
+    *   It calculates the MSE Loss against $V$.
+    *   It computes the **Gradient** of this loss w.r.t. the MLP weights.
+    *   *Concept*: High gradient = high "surprise" (memory didn't know this data).
+3.  **Update Weights (Associative Scan)**:
+    *   Instead of a loop, it uses an **Associative Scan** to apply thousands of sequential updates (Momentum + Decay + Gradient) in parallel.
+    *   **Result**: A sequence of updated weights ($W_{t}$) for every timestep.
+
+**Step B: Retrieving Memories (`retrieve_memories`)**
+This phase uses the updated weights to generate output features.
+1.  **Generate Queries**: Input `seq` is projected to Queries ($Q$).
+2.  **Functional Call**:
+    *   The code performs a "stateless" forward pass of the Memory MLP.
+    *   It uses $Q$ as input and the **New Weights** ($W_{t}$) calculated in Step A.
+    *   `Output = MemoryMLP(Q; Weights=W_t)`
+
+#### 3. The Backward Pass (Meta-Learning)
+
+This is the "Outer Loop" training. When you run `loss.backward()` on the main model (e.g., the Transformer):
+
+1.  **Differentiation through Optimization**:
+    *   Because the "Surprise" (Step A) was calculated using differentiable PyTorch functions (`torch.func.grad`), the gradient flows *through* the weight update steps.
+2.  **What is learned?**:
+    *   The model learns **how to generate Keys and Values** that are easy for the Memory MLP to store.
+    *   It learns **how to predict Learning Rates** to focus on important info and ignore noise.
+    *   It learns **how to Decay** old info to manage the limited capacity of the Memory MLP.
