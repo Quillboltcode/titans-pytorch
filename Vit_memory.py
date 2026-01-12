@@ -172,7 +172,7 @@ class MemoryViT(nn.Module):
         )
         
         # 2. Positional Embedding
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim)) # +1 for CLS token
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim)) # +1 for CLS token
         
         # 3. CLS Token
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
@@ -220,7 +220,7 @@ class MemoryViT(nn.Module):
         
         # 3. Append CLS Token
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
-        cls_tokens += self.pos_embedding[:, n:]
+        cls_tokens = cls_tokens + self.pos_embedding[:, n:]
         x = torch.cat((x, cls_tokens), dim = 1)
         
         # 4. Pass through Memory Layers
