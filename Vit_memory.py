@@ -30,6 +30,24 @@ class DropPath(nn.Module):
         random_tensor = x.new_empty(shape).bernoulli_(keep_prob)
         return x.div(keep_prob) * random_tensor
 
+
+#
+# Helper: FFN network
+#
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim),
+        )
+    def forward(self, x):
+        return self.net(x)
+
+
 # -----------------------------------------------------------------------------
 # Standard ViT Block (Baseline without NeuralMemory)
 # -----------------------------------------------------------------------------
@@ -75,7 +93,8 @@ class MemoryFFNTransformerBlock(nn.Module):
         dim,
         heads,
         memory_chunk_size = 64,
-        num_persistent_mem_tokens = 4
+        num_persistent_mem_tokens = 4,
+        drop_path = 0.
     ):
         super().__init__()
         
@@ -95,13 +114,14 @@ class MemoryFFNTransformerBlock(nn.Module):
         )
         
         self.to_out = nn.Linear(dim, dim, bias=False)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, memory_state = None):
         # Attention Branch
         attn_residual = x
         x_norm = self.norm_attn(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x = attn_residual + attn_out
+        x = attn_residual + self.drop_path(attn_out)
         
         # Memory Branch (Replacing FFN)
         mem_residual = x
@@ -114,7 +134,7 @@ class MemoryFFNTransformerBlock(nn.Module):
         )
         
         # Combine
-        x = mem_residual + self.to_out(mem_out)
+        x = mem_residual + self.drop_path(self.to_out(mem_out))
         
         return x, next_memory_state
 
