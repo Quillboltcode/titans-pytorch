@@ -75,8 +75,7 @@ class MemoryFFNTransformerBlock(nn.Module):
         dim,
         heads,
         memory_chunk_size = 64,
-        num_persistent_mem_tokens = 4,
-        drop_path = 0.
+        num_persistent_mem_tokens = 4
     ):
         super().__init__()
         
@@ -87,43 +86,35 @@ class MemoryFFNTransformerBlock(nn.Module):
         # 2. Neural Memory (Replacing FFN)
         self.norm_mem = nn.LayerNorm(dim)
         
+        # Initialize Neural Memory
+        # qkv_receives_diff_views = False for this standard implementation
         self.neural_memory = NeuralMemory(
             dim = dim,
             chunk_size = memory_chunk_size,
             qkv_receives_diff_views = False
         )
         
-        self.mem_gate = nn.Parameter(torch.ones(1, 1, dim) * 0.5)
-        
         self.to_out = nn.Linear(dim, dim, bias=False)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, memory_state = None):
         # Attention Branch
         attn_residual = x
         x_norm = self.norm_attn(x)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x = attn_residual + self.drop_path(attn_out)
+        x = attn_residual + attn_out
         
         # Memory Branch (Replacing FFN)
-        cls_token = x[:, :1]
-        patches_only = x[:, 1:]
-        
-        patches_norm = self.norm_mem(patches_only)
+        mem_residual = x
+        x_norm = self.norm_mem(x)
         
         # Neural Memory Forward
         mem_out, next_memory_state = self.neural_memory(
-            patches_norm, 
+            x_norm, 
             state = memory_state
         )
         
-        # Gating
-        mem_out = mem_out * torch.sigmoid(self.mem_gate)
-        
         # Combine
-        updated_patches = patches_only + self.drop_path(self.to_out(mem_out))
-        
-        x = torch.cat((cls_token, updated_patches), dim=1)
+        x = mem_residual + self.to_out(mem_out)
         
         return x, next_memory_state
 
@@ -233,7 +224,7 @@ class MemoryViT(nn.Module):
 @click.option('--lr', default=5e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
 @click.option('--image_size', default=32, help='Image size (e.g. 32 or 224)')
-@click.option('--patch_size', default=16, help='Patch size')
+@click.option('--patch_size', default=4, help='Patch size')
 @click.option('--memory_chunk_size', default=196, help='Memory chunk size')
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
@@ -412,6 +403,7 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
             wandb.log({
                 "train_loss": total_loss/len(train_loader),
                 "train_acc": acc,
+                "lr": optimizer.param_groups[0]['lr'],
                 "epoch": epoch + 1
             })
         
