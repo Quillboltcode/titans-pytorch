@@ -87,18 +87,13 @@ class MemoryFFNTransformerBlock(nn.Module):
         # 2. Neural Memory (Replacing FFN)
         self.norm_mem = nn.LayerNorm(dim)
         
-        # Initialize Neural Memory
-        # qkv_receives_diff_views = False for this standard implementation
         self.neural_memory = NeuralMemory(
             dim = dim,
             chunk_size = memory_chunk_size,
             qkv_receives_diff_views = False
         )
         
-        self.mem_gate = nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.Sigmoid()
-        )
+        self.mem_gate = nn.Parameter(torch.ones(1, 1, dim) * 0.5)
         
         self.to_out = nn.Linear(dim, dim, bias=False)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
@@ -111,20 +106,24 @@ class MemoryFFNTransformerBlock(nn.Module):
         x = attn_residual + self.drop_path(attn_out)
         
         # Memory Branch (Replacing FFN)
-        mem_residual = x
-        x_norm = self.norm_mem(x)
+        cls_token = x[:, :1]
+        patches_only = x[:, 1:]
+        
+        patches_norm = self.norm_mem(patches_only)
         
         # Neural Memory Forward
         mem_out, next_memory_state = self.neural_memory(
-            x_norm, 
+            patches_norm, 
             state = memory_state
         )
         
         # Gating
-        mem_out = mem_out * self.mem_gate(x_norm)
+        mem_out = mem_out * torch.sigmoid(self.mem_gate)
         
         # Combine
-        x = mem_residual + self.drop_path(self.to_out(mem_out))
+        updated_patches = patches_only + self.drop_path(self.to_out(mem_out))
+        
+        x = torch.cat((cls_token, updated_patches), dim=1)
         
         return x, next_memory_state
 
@@ -152,6 +151,8 @@ class MemoryViT(nn.Module):
         num_patches = (image_size // patch_size) ** 2
         patch_dim = 3 * patch_size * patch_size
         
+        memory_chunk_size = min(memory_chunk_size, num_patches)
+        
         # 1. Patch Embedding
         self.to_patch_embedding = nn.Sequential(
             nn.LayerNorm(patch_dim),
@@ -160,9 +161,9 @@ class MemoryViT(nn.Module):
         )
         
         # 2. Positional Embedding
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim))
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim)) # +1 for CLS token
         
-        # 3. CLS Token (Placed at the END to see full memory context)
+        # 3. CLS Token
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
         
         # 4. Transformer Layers
@@ -203,17 +204,12 @@ class MemoryViT(nn.Module):
         
         b, n, _ = x.shape
         
-        # 2. Add Positional Embedding
-        x += self.pos_embedding[:, :n]
-        
         # 3. Prepend CLS Token
-        # Note: Standard ViT prepends, but we APPEND it to the end for the causal memory
         cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
-        x = torch.cat((x, cls_tokens), dim = 1) 
+        x = torch.cat((cls_tokens, x), dim = 1)
 
-        # Debug check (optional, remove in production):
-        # Ensure sequence length exceeds chunk size slightly to force memory usage for CLS
-        # assert x.shape[1] > self.layers[0].neural_memory.chunk_size
+        # 2. Add Positional Embedding
+        x += self.pos_embedding[:, :(n + 1)]
         
         # 4. Pass through Memory Layers
         for layer in self.layers:
@@ -223,8 +219,7 @@ class MemoryViT(nn.Module):
                 x = layer(x)
             
         # 5. Get CLS Token Output
-        # It's at the last position (-1)
-        cls_token_out = x[:, -1]
+        cls_token_out = x[:, 0]
         
         return self.to_logits(self.norm(cls_token_out))
 
@@ -237,7 +232,7 @@ class MemoryViT(nn.Module):
 @click.option('--epochs', default=100, help='Number of epochs')
 @click.option('--lr', default=5e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
-@click.option('--image_size', default=224, help='Image size (e.g. 32 or 224)')
+@click.option('--image_size', default=32, help='Image size (e.g. 32 or 224)')
 @click.option('--patch_size', default=16, help='Patch size')
 @click.option('--memory_chunk_size', default=196, help='Memory chunk size')
 @click.option('--drop_path_rate', default=0.1, help='Stochastic depth rate')
@@ -270,8 +265,12 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
         })
     
     # CONFIGURE DATASET-SPECIFIC STATS HERE!
-    MEAN = (0.485, 0.456, 0.406)  # REPLACE WITH YOUR DATASET'S MEAN
-    STD = (0.229, 0.224, 0.225)   # REPLACE WITH YOUR DATASET'S STD
+    if image_size <= 32:
+        MEAN = (0.4914, 0.4822, 0.4465)
+        STD = (0.2023, 0.1994, 0.2010)
+    else:
+        MEAN = (0.485, 0.456, 0.406)
+        STD = (0.229, 0.224, 0.225)
 
     if simple_aug:
         transform_train = transforms.Compose([
@@ -298,13 +297,19 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
         ])
 
     # TEST TRANSFORM FIX
-    resize_size = int(image_size / 0.875 + 0.5)  # Proper rounding
-    transform_test = transforms.Compose([
-        transforms.Resize(resize_size, interpolation=3),  # BICUBIC for ViTs
-        transforms.CenterCrop(image_size),
-        transforms.ToTensor(),
-        transforms.Normalize(MEAN, STD),
-    ])
+    if image_size <= 32:
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(MEAN, STD),
+        ])
+    else:
+        resize_size = int(image_size / 0.875 + 0.5)  # Proper rounding
+        transform_test = transforms.Compose([
+            transforms.Resize(resize_size, interpolation=transforms.InterpolationMode.BICUBIC),
+            transforms.CenterCrop(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize(MEAN, STD),
+        ])
     
     if accelerator.is_main_process:
         datasets.CIFAR10(root='./data', train=True, download=True)
@@ -339,7 +344,7 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
 
     # Warm-up scheduler for the first 5 epochs
-    warmup_epochs = 2
+    warmup_epochs = 3
     warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
 
     # Main scheduler after warm-up
@@ -359,30 +364,18 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
     # Load checkpoint if resuming training
     start_epoch = 0
     if resume:
+        if accelerator.is_main_process:
+            print(f"Resuming training from {resume}")
         accelerator.load_state(resume)
         try:
+            # Correctly parse epoch from directory name
             start_epoch = int(os.path.basename(os.path.normpath(resume)).split('_')[-1])
         except (ValueError, IndexError):
-            pass
+            print("Could not parse epoch from checkpoint path, starting from 0.")
+            start_epoch = 0
         
-        # Update learning rate and re-init schedulers for new hyperparameters
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-            param_group['initial_lr'] = lr
-            
-        # Re-initialize schedulers to respect new epochs and lr
-        warmup_scheduler = optim.lr_scheduler.LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs * len(train_loader))
-        main_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs - warmup_epochs)
-        
-        # Fast-forward main scheduler if past warmup
-        if start_epoch > warmup_epochs:
-            # We don't need to step warmup_scheduler as it's done
-            for _ in range(start_epoch - warmup_epochs):
-                main_scheduler.step()
-
         if accelerator.is_main_process:
-            print(f"Resuming training from epoch {start_epoch}")
-            print(f"Hyperparameters updated: LR={lr}, Epochs={epochs}")
+            print(f"Resumed training from epoch {start_epoch}")
 
     for epoch in range(start_epoch, epochs):
         model.train()
