@@ -31,6 +31,41 @@ class DropPath(nn.Module):
         return x.div(keep_prob) * random_tensor
 
 # -----------------------------------------------------------------------------
+# Standard ViT Block (Baseline without NeuralMemory)
+# -----------------------------------------------------------------------------
+
+class StandardTransformerBlock(nn.Module):
+    def __init__(self, dim, heads, mlp_ratio=4., drop_path=0.):
+        super().__init__()
+        self.norm_attn = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
+        
+        self.norm_mlp = nn.LayerNorm(dim)
+        mlp_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, dim)
+        )
+        
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+
+    def forward(self, x):
+        # Attention
+        attn_residual = x
+        x_norm = self.norm_attn(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
+        x = attn_residual + self.drop_path(attn_out)
+        
+        # MLP
+        mlp_residual = x
+        x_norm = self.norm_mlp(x)
+        mlp_out = self.mlp(x_norm)
+        x = mlp_residual + self.drop_path(mlp_out)
+        
+        return x
+
+# -----------------------------------------------------------------------------
 # Memory Transformer Block (Strategy 2)
 # -----------------------------------------------------------------------------
 
@@ -104,7 +139,8 @@ class MemoryViT(nn.Module):
         patch_size = 16,
         num_classes = 10,
         dim = 192,           # Small dimension for CIFAR
-        depth = 6,
+        vit_depth = 4,
+        memory_depth = 2,
         heads = 3,
         memory_chunk_size = 196, # Equal to sequence length (14*14)
         drop_path_rate = 0.
@@ -131,8 +167,20 @@ class MemoryViT(nn.Module):
         
         # 4. Transformer Layers
         self.layers = nn.ModuleList([])
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
-        for i in range(depth):
+        total_depth = vit_depth + memory_depth
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, total_depth)]  # stochastic depth decay rule
+        
+        # Standard ViT Layers
+        for i in range(vit_depth):
+            self.layers.append(
+                StandardTransformerBlock(
+                    dim=dim,
+                    heads=heads,
+                    drop_path=dpr[i]
+                )
+            )
+        # Memory ViT Layers
+        for i in range(vit_depth, total_depth):
             self.layers.append(
                 MemoryFFNTransformerBlock(
                     dim=dim, 
@@ -168,10 +216,11 @@ class MemoryViT(nn.Module):
         # assert x.shape[1] > self.layers[0].neural_memory.chunk_size
         
         # 4. Pass through Memory Layers
-        memory_states = [None] * len(self.layers)
-        
-        for i, layer in enumerate(self.layers):
-            x, memory_states[i] = layer(x, memory_state=memory_states[i])
+        for layer in self.layers:
+            if isinstance(layer, MemoryFFNTransformerBlock):
+                x, _ = layer(x, memory_state=None)
+            else:
+                x = layer(x)
             
         # 5. Get CLS Token Output
         # It's at the last position (-1)
@@ -186,7 +235,7 @@ class MemoryViT(nn.Module):
 @click.command()
 @click.option('--batch_size', default=64, help='Batch size')
 @click.option('--epochs', default=100, help='Number of epochs')
-@click.option('--lr', default=1e-3, help='Learning rate')
+@click.option('--lr', default=5e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
 @click.option('--image_size', default=224, help='Image size (e.g. 32 or 224)')
 @click.option('--patch_size', default=16, help='Patch size')
@@ -195,7 +244,10 @@ class MemoryViT(nn.Module):
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 @click.option('--resume', default=None, help='Path to checkpoint to resume training')
 @click.option('--gradient_accumulation_steps', default=4, help='Number of steps for gradient accumulation')
-def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size, drop_path_rate, wandb_project, resume, gradient_accumulation_steps):
+@click.option('--simple_aug', is_flag=True, help='Use simple augmentation (only resize and flip)')
+@click.option('--vit_depth', default=4, help='Number of standard ViT layers')
+@click.option('--memory_depth', default=2, help='Number of memory ViT layers')
+def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size, drop_path_rate, wandb_project, resume, gradient_accumulation_steps, simple_aug, vit_depth, memory_depth):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
     device = accelerator.device
@@ -211,26 +263,47 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
             "patch_size": patch_size,
             "memory_chunk_size": memory_chunk_size,
             "drop_path_rate": drop_path_rate,
-            "architecture": "MemoryViT"
+            "architecture": "MemoryViT",
+            "simple_aug": simple_aug,
+            "vit_depth": vit_depth,
+            "memory_depth": memory_depth
         })
     
-    # Augmentation with Rand-Augment
-    # Scale translate constant based on image size (approx half of image size)
-    translate_const = int(image_size * 0.5)
-    transform_train = transforms.Compose([
-        transforms.RandomResizedCrop(image_size),
-        transforms.RandomHorizontalFlip(),
-        timm.data.auto_augment.rand_augment_transform('rand-m9-mstd0.5-n2', hparams={'translate_const': translate_const, 'img_mean': (124, 116, 104)}),
-        transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
-    ])
+    # CONFIGURE DATASET-SPECIFIC STATS HERE!
+    MEAN = (0.485, 0.456, 0.406)  # REPLACE WITH YOUR DATASET'S MEAN
+    STD = (0.229, 0.224, 0.225)   # REPLACE WITH YOUR DATASET'S STD
 
-    resize_size = int(image_size / 0.875) # Standard crop ratio
+    if simple_aug:
+        transform_train = transforms.Compose([
+            transforms.RandomResizedCrop(image_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(MEAN, STD),
+        ])
+    else:
+        # SMART HYPERPARAMETERS
+        policy = 'rand-m5-mstd0.5-inc1' if image_size <= 32 else 'rand-m9-mstd0.5-n2'
+        translate_const = max(5, int(image_size * 0.1))  # Safe for all sizes
+        
+        transform_train = transforms.Compose([
+            # CRITICAL ORDER FIX
+            timm.data.auto_augment.rand_augment_transform(
+                policy,
+                hparams={'translate_const': translate_const}  # NO img_mean NEEDED
+            ),
+            transforms.RandomResizedCrop(image_size),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(MEAN, STD),
+        ])
+
+    # TEST TRANSFORM FIX
+    resize_size = int(image_size / 0.875 + 0.5)  # Proper rounding
     transform_test = transforms.Compose([
-        transforms.Resize(resize_size),
+        transforms.Resize(resize_size, interpolation=3),  # BICUBIC for ViTs
         transforms.CenterCrop(image_size),
         transforms.ToTensor(),
-        transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)),
+        transforms.Normalize(MEAN, STD),
     ])
     
     if accelerator.is_main_process:
@@ -251,7 +324,8 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
         patch_size=patch_size,
         num_classes=10,
         dim=dim,
-        depth=6,
+        vit_depth=vit_depth,
+        memory_depth=memory_depth,
         heads=3,
         memory_chunk_size=memory_chunk_size,
         drop_path_rate=drop_path_rate
