@@ -172,7 +172,7 @@ class MemoryViT(nn.Module):
         )
         
         # 2. Positional Embedding
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches + 1, dim)) # +1 for CLS token
+        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches, dim)) # +1 for CLS token
         
         # 3. CLS Token
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
