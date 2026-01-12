@@ -195,22 +195,24 @@ class MemoryViT(nn.Module):
         
         b, n, _ = x.shape
         
-        # 3. Prepend CLS Token
-        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
-        x = torch.cat((cls_tokens, x), dim = 1)
-
         # 2. Add Positional Embedding
-        x += self.pos_embedding[:, :(n + 1)]
+        x += self.pos_embedding[:, :n]
+        
+        # 3. Append CLS Token
+        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        cls_tokens += self.pos_embedding[:, n:]
+        x = torch.cat((x, cls_tokens), dim = 1)
         
         # 4. Pass through Memory Layers
-        for layer in self.layers:
+        memory_states = [None] * len(self.layers)
+        for i, layer in enumerate(self.layers):
             if isinstance(layer, MemoryFFNTransformerBlock):
-                x, _ = layer(x, memory_state=None)
+                x, memory_states[i] = layer(x, memory_state=memory_states[i])
             else:
                 x = layer(x)
             
         # 5. Get CLS Token Output
-        cls_token_out = x[:, 0]
+        cls_token_out = x[:, -1]
         
         return self.to_logits(self.norm(cls_token_out))
 
