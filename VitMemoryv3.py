@@ -9,7 +9,6 @@ from torchvision import datasets, transforms
 from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
-import wandb
 from accelerate import Accelerator, DistributedDataParallelKwargs
 import timm
 
@@ -257,12 +256,15 @@ class MemoryViT(nn.Module):
 @click.option('--memory_depth', default=2, help='Number of memory ViT layers')
 def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size, drop_path_rate, wandb_project, resume, gradient_accumulation_steps, simple_aug, vit_depth, memory_depth):
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs])
+    accelerator = Accelerator(kwargs_handlers=[ddp_kwargs],log_with="wandb")
     device = accelerator.device
     
     if accelerator.is_main_process:
         print(f"Training on {device}")
-        wandb.init(project=wandb_project, config={
+
+    accelerator.init_trackers(
+        project_name=wandb_project,
+        config={
             "learning_rate": lr,
             "epochs": epochs,
             "batch_size": batch_size,
@@ -275,7 +277,8 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
             "simple_aug": simple_aug,
             "vit_depth": vit_depth,
             "memory_depth": memory_depth
-        })
+        }
+    )
     
     # CONFIGURE DATASET-SPECIFIC STATS HERE!
     if image_size <= 32:
@@ -422,7 +425,7 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
             acc = 100. * correct / total
             print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.2f}%")
             
-            wandb.log({
+            accelerator.log({
                 "train_loss": total_loss/len(train_loader),
                 "train_acc": acc,
                 "lr": optimizer.param_groups[0]['lr'],
@@ -457,14 +460,13 @@ def train(batch_size, epochs, lr, dim, image_size, patch_size, memory_chunk_size
             
             if accelerator.is_main_process:
                 print(f"--> Test Loss: {test_loss/len(test_loader):.4f} | Test Acc: {100.*correct/total:.2f}%")
-                wandb.log({
+                accelerator.log({
                     "test_loss": test_loss/len(test_loader),
                     "test_acc": 100.*correct/total,
                     "epoch": epoch + 1
                 })
             
-    if accelerator.is_main_process:
-        wandb.finish()
+    accelerator.end_training()
 
 if __name__ == '__main__':
     train()
