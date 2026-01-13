@@ -152,7 +152,7 @@ class MemoryViT(nn.Module):
 @click.option('--epochs', default=50, help='Number of epochs')
 @click.option('--lr', default=3e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
-@click.option('--wandb_project', default='memory-vit-cifar10-v1', help='WandB Project Name')
+@click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 def train(batch_size, epochs, lr, dim, wandb_project):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on {device}")
@@ -257,3 +257,6 @@ def train(batch_size, epochs, lr, dim, wandb_project):
             })
             
     wandb.finish()
+
+if __name__ == '__main__':
+    train()
