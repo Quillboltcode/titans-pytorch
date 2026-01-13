@@ -9,6 +9,7 @@ from torchvision import datasets, transforms
 from einops import rearrange, repeat
 from titans_pytorch.neural_memory import NeuralMemory
 from tqdm import tqdm
+import wandb
 
 # -----------------------------------------------------------------------------
 # Memory Transformer Block (Strategy 2)
@@ -151,9 +152,18 @@ class MemoryViT(nn.Module):
 @click.option('--epochs', default=50, help='Number of epochs')
 @click.option('--lr', default=3e-4, help='Learning rate')
 @click.option('--dim', default=192, help='Model dimension')
-def train(batch_size, epochs, lr, dim):
+@click.option('--wandb_project', default='memory-vit-cifar10-v1', help='WandB Project Name')
+def train(batch_size, epochs, lr, dim, wandb_project):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on {device}")
+    
+    wandb.init(project=wandb_project, config={
+        "learning_rate": lr,
+        "epochs": epochs,
+        "batch_size": batch_size,
+        "dim": dim,
+        "architecture": "MemoryViT-V1"
+    })
     
     # Augmentation is key for CIFAR
     transform_train = transforms.Compose([
@@ -217,6 +227,13 @@ def train(batch_size, epochs, lr, dim):
         acc = 100. * correct / total
         print(f"Epoch {epoch+1}/{epochs} | Loss: {total_loss/len(train_loader):.4f} | Acc: {acc:.2f}%")
         
+        wandb.log({
+            "train_loss": total_loss/len(train_loader),
+            "train_acc": acc,
+            "lr": optimizer.param_groups[0]['lr'],
+            "epoch": epoch + 1
+        })
+        
         # Validation
         if (epoch + 1) % 5 == 0:
             model.eval()
@@ -233,4 +250,10 @@ def train(batch_size, epochs, lr, dim):
                     total += labels.size(0)
                     correct += predicted.eq(labels).sum().item()
             print(f"--> Test Loss: {test_loss/len(test_loader):.4f} | Test Acc: {100.*correct/total:.2f}%")
-
+            wandb.log({
+                "test_loss": test_loss/len(test_loader),
+                "test_acc": 100.*correct/total,
+                "epoch": epoch + 1
+            })
+            
+    wandb.finish()
