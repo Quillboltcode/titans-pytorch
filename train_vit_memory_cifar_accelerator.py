@@ -178,15 +178,19 @@ def train(batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
         print(f"Total Parameters: {params:,}")
         
         # Calculate FLOPs using custom counter
-        standard_flops, memory_flops = count_flops(model)
-        print(f"Standard FLOPs: {standard_flops / 1e9:.4f} GFLOPs")
-        print(f"Memory-aware FLOPs: {memory_flops / 1e9:.4f} GFLOPs")
-        
-        # Log FLOP metrics
-        accelerator.log({
-            "standard_flops": standard_flops,
-            "memory_flops": memory_flops
-        })
+        try:
+            standard_flops, memory_flops = count_flops(model)
+            print(f"Standard FLOPs: {standard_flops / 1e9:.4f} GFLOPs")
+            print(f"Memory-aware FLOPs: {memory_flops / 1e9:.4f} GFLOPs")
+            
+            # Log FLOP metrics
+            accelerator.log({
+                "standard_flops": standard_flops,
+                "memory_flops": memory_flops
+            })
+        except Exception as e:
+            print(f"FLOP counting failed: {e}")
+            print("Proceeding without FLOP metrics...")
     
     # Optimizer with weight decay 0.05 as per recipe
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=0.05)
