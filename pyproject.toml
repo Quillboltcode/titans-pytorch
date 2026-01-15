@@ -38,7 +38,12 @@ dependencies = [
     "tqdm",
     "x-transformers",
     "torchvision",
-    "timm"
+    "timm",
+    "matplotlib>=3.9.4",
+    "seaborn>=0.13.2",
+    "scikit-learn>=1.6.1",
+    "accelerate>=1.10.1",
+    "fvcore>=0.1.5.post20221221",
 ]
 
 [project.urls]

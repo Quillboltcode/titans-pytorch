@@ -159,3 +159,9 @@ This is the "Outer Loop" training. When you run `loss.backward()` on the main mo
     *   The model learns **how to generate Keys and Values** that are easy for the Memory MLP to store.
     *   It learns **how to predict Learning Rates** to focus on important info and ignore noise.
     *   It learns **how to Decay** old info to manage the limited capacity of the Memory MLP.
+
+
+    # Note
+    graph of neural memory
+    b,h,w of memory
+    cell sample->size of mem

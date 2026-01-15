@@ -83,15 +83,26 @@ class Transformer(nn.Module):
                 Attention(dim, heads = heads, dim_head = dim_head),
                 ff
             ]))
-    def forward(self, x):
-        for attn, ff in self.layers:
+    def forward(self, x, state=None):
+        # state would be a list of NeuralMemStates, one for each layer
+        # using Memory as layer 
+        new_states = []
+        state = state or [None] * len(self.layers)
+        for i, (attn, ff) in enumerate(self.layers):
+            # 1. Attention (Local/Global)
             x = attn(x) + x
+            
+            # 2. Neural Memory (Long-term)
             if self.use_memory:
-                out, _ = ff(x)
+                # Pass the previous state for this layer
+                out, layer_state = ff(x, state = state[i])
                 x = out + x
+                new_states.append(layer_state)
             else:
                 x = ff(x) + x
-        return self.norm(x)
+                new_states.append(None)
+
+        return self.norm(x), new_states
 
 class SimpleViT(nn.Module):
     def __init__(self, *, image_size, patch_size, num_classes, dim, depth, heads, mlp_dim, channels = 3, dim_head = 64, use_memory=False, memory_chunk_size=64):
@@ -129,7 +140,7 @@ class SimpleViT(nn.Module):
         x = self.to_patch_embedding(img)
         x += self.pos_embedding.to(device, dtype=x.dtype)
 
-        x = self.transformer(x)
+        x, _ = self.transformer(x)
         x = x.mean(dim = 1)
 
         x = self.to_latent(x)
