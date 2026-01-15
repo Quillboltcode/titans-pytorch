@@ -86,6 +86,7 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 @click.command()
+@click.option('--model_memory', is_flag=True, help='Use MemoryViT')
 @click.option('--batch_size', default=128, help='Batch size per GPU')  # 128 x 2 GPUs = 256 total
 @click.option('--epochs', default=150, help='Number of epochs')
 @click.option('--lr', default=1e-3, help='Learning rate')
@@ -93,7 +94,7 @@ def set_seed(seed=42):
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 @click.option('--seed', default=42, help='Random seed')
 @click.option('--use_mixup', is_flag=True, help='Use mixup augmentation (alpha=0.2)')
-def train(batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
+def train(model_memory, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
     set_seed(seed)
     
     # Setup accelerator for multi-GPU training
@@ -106,6 +107,8 @@ def train(batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
 
     # Hyperparameters configuration
     config = {
+        "model_name": "MemoryViT" if model_memory else "BaselineViT",
+        "optimizer": "AdamW",
         "learning_rate": lr,
         "epochs": epochs,
         "batch_size_per_gpu": batch_size,
@@ -168,7 +171,7 @@ def train(batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
         depth=6,
         heads=3,
         mlp_dim=dim * 4,
-        use_memory=True,
+        use_memory=True if model_memory else False,
         memory_chunk_size=64
     )
     
@@ -364,8 +367,8 @@ def train(batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
         })
         
         # Cleanup checkpoint
-        if os.path.exists(checkpoint_dir):
-            shutil.rmtree(checkpoint_dir)
+        # if os.path.exists(checkpoint_dir):
+        #     shutil.rmtree(checkpoint_dir)
             
     # End training and close trackers
     accelerator.end_training()

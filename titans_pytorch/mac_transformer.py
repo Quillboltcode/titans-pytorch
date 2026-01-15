@@ -470,6 +470,11 @@ class SegmentedAttention(Module):
 # MAC transformer
 
 class MemoryAsContextTransformer(Module):
+    """
+    Memory As Context (MAC) Transformer.
+    Combines Local/Segmented Attention (with bounded KV cache) for short-term context
+    and Neural Memory (compressing history into weights) for long-term context.
+    """
     def __init__(
         self,
         *,
@@ -873,6 +878,8 @@ class MemoryAsContextTransformer(Module):
             next_kv_caches = stack([stack(kv_cache) for kv_cache in next_kv_caches])
 
             # handle kv cache length depending on local attention type
+            # The KV cache is bounded by attn_window_size, as Neural Memory handles the long-term history.
+            # This replaces the need for a global, ever-growing KV cache.
 
             next_kv_caches = next_kv_caches[..., -attn_window_size:, :]
 

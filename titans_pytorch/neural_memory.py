@@ -45,8 +45,8 @@ LinearNoBias = partial(Linear, bias = False)
 
 NeuralMemState = namedtuple('NeuralMemState', [
     'seq_index',
-    'weights',
-    'cache_store_segment',
+    'weights',             # The "compressed" memory (replaces global KV cache)
+    'cache_store_segment', # Small buffer for chunking updates (not an attention KV cache)
     'states',
     'updates',
 ])
@@ -256,6 +256,11 @@ def default_loss_fn(pred, target):
     return (pred - target).pow(2).mean(dim = -1)
 
 class NeuralMemory(Module):
+    """
+    Neural Memory module.
+    Stores history in the weights of a neural network (memory_model), updated via gradient descent during the forward pass.
+    This serves as the long-term memory, acting as a compressed alternative to explicit KV caching of history.
+    """
     def __init__(
         self,
         dim,
