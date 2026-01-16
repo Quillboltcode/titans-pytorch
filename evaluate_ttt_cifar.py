@@ -128,6 +128,8 @@ def evaluate_with_ttt(model, test_loader, accelerator, ttt_steps=1):
                 changed = check_state_change(initial_states, new_states, f"TTT Step {ttt_step}")
                 if not changed:
                     print("Warning: NeuralMemState did not change during TTT update!")
+                else:
+                    print("NeuralMemState changed during TTT update!")
 
             # No external backward needed - NeuralMemory handles internal updates
             # But we need to compute loss to provide supervision signal
