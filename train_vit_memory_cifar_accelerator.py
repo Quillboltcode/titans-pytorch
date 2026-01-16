@@ -86,7 +86,7 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 @click.command()
-@click.option('--model_memory', is_flag=True, help='Use MemoryViT')
+@click.option('--baseline', is_flag=True, help='Use Baseline ViT (no memory)')
 @click.option('--batch_size', default=128, help='Batch size per GPU')  # 128 x 2 GPUs = 256 total
 @click.option('--epochs', default=150, help='Number of epochs')
 @click.option('--lr', default=1e-3, help='Learning rate')
@@ -94,7 +94,7 @@ def set_seed(seed=42):
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 @click.option('--seed', default=42, help='Random seed')
 @click.option('--use_mixup', is_flag=True, help='Use mixup augmentation (alpha=0.2)')
-def train(model_memory, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
+def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
     set_seed(seed)
     
     # Setup accelerator for multi-GPU training
@@ -107,7 +107,7 @@ def train(model_memory, batch_size, epochs, lr, dim, wandb_project, seed, use_mi
 
     # Hyperparameters configuration
     config = {
-        "model_name": "MemoryViT" if model_memory else "BaselineViT",
+        "model_name": "baseline" if baseline else "MemoryViT",
         "optimizer": "AdamW",
         "learning_rate": lr,
         "epochs": epochs,
@@ -122,8 +122,15 @@ def train(model_memory, batch_size, epochs, lr, dim, wandb_project, seed, use_mi
         "seed": seed,
     }
     
+    # Set run name based on configuration
+    run_name = "baseline" if baseline else "memory_vit"
+
     # Initialize wandb tracking
-    accelerator.init_trackers(project_name=wandb_project, config=config)
+    accelerator.init_trackers(
+        project_name=wandb_project, 
+        config=config,
+        init_kwargs={"wandb": {"name": run_name}}
+    )
     
     # Data augmentation - stronger than before
     transform_train = transforms.Compose([
@@ -171,7 +178,7 @@ def train(model_memory, batch_size, epochs, lr, dim, wandb_project, seed, use_mi
         depth=6,
         heads=3,
         mlp_dim=dim * 4,
-        use_memory=True if model_memory else False,
+        use_memory=False if baseline else True,
         memory_chunk_size=64
     )
     
