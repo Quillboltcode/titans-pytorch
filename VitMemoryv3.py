@@ -145,3 +145,17 @@ class SimpleViT(nn.Module):
 
         x = self.to_latent(x)
         return self.linear_head(x)
+
+if __name__ == '__main__':
+    model = SimpleViT(
+        image_size=32,
+        patch_size=4,
+        num_classes=10,
+        dim=192,
+        depth=6,
+        heads=3,
+        mlp_dim=192*4,
+        use_memory=True,
+        memory_chunk_size=64
+    )
+    print(sum(p.numel() for p in model.parameters() if p.requires_grad))

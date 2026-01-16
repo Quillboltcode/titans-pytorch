@@ -118,3 +118,8 @@ class MemoryViT(nn.Module):
             x, memory_states[i] = layer(x, memory_state=memory_states[i])
         cls_token_out = x[:, -1]
         return self.to_logits(self.norm(cls_token_out))
+
+if __name__ == '__main__':
+    model = MemoryViT()
+    params_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total Parameters: {params_count:,}")

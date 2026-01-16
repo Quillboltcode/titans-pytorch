@@ -22,7 +22,7 @@ from tqdm import tqdm
 from VitMemoryv3 import SimpleViT
 from train_vit_memory_cifar_accelerator import count_flops
 
-def load_best_model(checkpoint_path, num_classes=10, dim=192):
+def load_best_model(checkpoint_path, num_classes=10, dim=192, use_memory=True):
     """Load the best model from checkpoint"""
     try:
         # Create model
@@ -34,7 +34,7 @@ def load_best_model(checkpoint_path, num_classes=10, dim=192):
             depth=6,
             heads=3,
             mlp_dim=dim*4,
-            use_memory=True,
+            use_memory=use_memory,
             memory_chunk_size=64
         )
         
@@ -90,6 +90,7 @@ def evaluate_model(model, test_loader, device='cuda' if torch.cuda.is_available(
     
     all_preds = []
     all_labels = []
+    all_imgs = []
     
     with torch.no_grad():
         for imgs, labels in tqdm(test_loader, desc="Evaluating"):
@@ -100,8 +101,9 @@ def evaluate_model(model, test_loader, device='cuda' if torch.cuda.is_available(
             
             all_preds.append(preds.cpu().numpy())
             all_labels.append(labels.cpu().numpy())
+            all_imgs.append(imgs.cpu().numpy())
     
-    return np.concatenate(all_preds), np.concatenate(all_labels)
+    return np.concatenate(all_preds), np.concatenate(all_labels), np.concatenate(all_imgs)
 
 def plot_confusion_matrix(labels, preds, class_names, title="Confusion Matrix"):
     """Plot confusion matrix"""
@@ -143,20 +145,33 @@ def plot_class_accuracy(labels, preds, class_names, title="Per-Class Accuracy"):
     plt.tight_layout()
     return plt.gcf()
 
-def plot_incorrect_predictions(labels, preds, class_names, num_samples=10):
+def plot_incorrect_predictions(images, labels, preds, class_names, num_samples=10):
     """Plot examples of incorrect predictions"""
     incorrect_mask = labels != preds
+    incorrect_images = images[incorrect_mask][:num_samples]
     incorrect_labels = labels[incorrect_mask][:num_samples]
     incorrect_preds = preds[incorrect_mask][:num_samples]
     
-    plt.figure(figsize=(15, 8))
-    for i, (true_label, pred_label) in enumerate(zip(incorrect_labels, incorrect_preds)):
-        plt.text(0.1, 0.9 - i*0.1, 
-                f'True: {class_names[true_label]} | Pred: {class_names[pred_label]}',
-                fontsize=10)
+    if len(incorrect_labels) == 0:
+        return plt.figure()
+
+    rows = int(np.ceil(len(incorrect_labels) / 5))
+    plt.figure(figsize=(15, 3 * rows))
     
-    plt.title(f'Examples of Incorrect Predictions ({num_samples} samples)')
-    plt.axis('off')
+    mean = np.array([0.4914, 0.4822, 0.4465])
+    std = np.array([0.2023, 0.1994, 0.2010])
+
+    for i in range(len(incorrect_labels)):
+        img = incorrect_images[i].transpose(1, 2, 0) # CHW -> HWC
+        img = std * img + mean
+        img = np.clip(img, 0, 1)
+        
+        plt.subplot(rows, 5, i+1)
+        plt.imshow(img)
+        plt.title(f'True: {class_names[incorrect_labels[i]]}\nPred: {class_names[incorrect_preds[i]]}',
+                 color='red', fontsize=10)
+        plt.axis('off')
+        
     plt.tight_layout()
     return plt.gcf()
 
@@ -168,15 +183,15 @@ def analyze_performance(labels, preds, class_names):
     accuracy = np.mean(labels == preds)
     
     # Find best and worst classes
-    class_accuracies = [report[str(i)]['precision'] for i in range(len(class_names))]
+    class_accuracies = [report[name]['f1-score'] for name in class_names]
     best_classes = np.argsort(class_accuracies)[-3:][::-1]
     worst_classes = np.argsort(class_accuracies)[:3]
     
     print(f"Overall Accuracy: {accuracy:.4f}")
-    print(f"Best Classes: {[class_names[i] for i in best_classes]}")
-    print(f"Worst Classes: {[class_names[i] for i in worst_classes]}")
+    print(f"Best Classes (by F1-score): {[class_names[i] for i in best_classes]}")
+    print(f"Worst Classes (by F1-score): {[class_names[i] for i in worst_classes]}")
     
-    return report
+    return report, accuracy, best_classes, worst_classes
 
 def main():
     """Main visualization function"""
@@ -188,6 +203,8 @@ def main():
                        help='Dataset to use')
     parser.add_argument('--output_dir', type=str, default='visualizations', 
                        help='Directory to save visualizations')
+    parser.add_argument('--baseline', action='store_true', help='Use Baseline ViT (no memory)')
+    parser.add_argument('--dim', type=int, default=192, help='Model dimension')
     
     args = parser.parse_args()
     
@@ -197,11 +214,15 @@ def main():
     # Load model
     print("Loading model...")
     num_classes = 10 if args.dataset == 'cifar10' else 100
-    model = load_best_model(args.checkpoint, num_classes=num_classes)
+    model = load_best_model(args.checkpoint, num_classes=num_classes, dim=args.dim, use_memory=not args.baseline)
     
     if model is None:
         print("Failed to load model. Exiting.")
         return
+    
+    # Calculate Parameters and FLOPs
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total Parameters: {params:,}")
     
     # Calculate FLOPs
     print("Calculating FLOPs...")
@@ -223,7 +244,7 @@ def main():
     
     # Evaluate model
     print("Evaluating model...")
-    preds, labels = evaluate_model(model, test_loader)
+    preds, labels, images = evaluate_model(model, test_loader)
     
     # Generate visualizations
     print("Generating visualizations...")
@@ -239,18 +260,41 @@ def main():
     acc_fig.savefig(f"{args.output_dir}/{args.dataset}_class_accuracy.png", dpi=300, bbox_inches='tight')
     
     # 3. Incorrect predictions examples
-    incorr_fig = plot_incorrect_predictions(labels, preds, class_names)
+    incorr_fig = plot_incorrect_predictions(images, labels, preds, class_names)
     incorr_fig.savefig(f"{args.output_dir}/{args.dataset}_incorrect_predictions.png", dpi=300, bbox_inches='tight')
     
     # 4. Performance analysis
     print("\nPerformance Analysis:")
-    report = analyze_performance(labels, preds, class_names)
+    report, accuracy, best_classes, worst_classes = analyze_performance(labels, preds, class_names)
     
-    # Save classification report
-    with open(f"{args.output_dir}/{args.dataset}_classification_report.txt", 'w') as f:
+    # Save performance summary and classification report
+    summary_path = f"{args.output_dir}/{args.dataset}_performance_summary.txt"
+    with open(summary_path, 'w') as f:
+        f.write("="*40 + "\n")
+        f.write("      Performance and Model Summary\n")
+        f.write("="*40 + "\n\n")
+        f.write(f"Model Checkpoint: {args.checkpoint}\n")
+        f.write(f"Dataset: {args.dataset.upper()}\n\n")
+        
+        f.write("--- Model Stats ---\n")
+        f.write(f"Total Parameters: {params:,}\n")
+        f.write(f"Standard FLOPs: {std_flops/1e9:.4f} GFLOPs\n")
+        f.write(f"Memory-aware FLOPs: {mem_flops/1e9:.4f} GFLOPs\n\n")
+        
+        f.write("--- Evaluation Metrics ---\n")
+        f.write(f"Overall Accuracy: {accuracy:.4f}\n\n")
+        
+        f.write("--- Per-Class Performance (by F1-score) ---\n")
+        f.write(f"Top 3 Best Performing Classes:\n")
+        f.write('\n'.join([f"  - {class_names[i]}: {report[class_names[i]]['f1-score']:.4f}" for i in best_classes]))
+        f.write(f"\n\nTop 3 Worst Performing Classes:\n")
+        f.write('\n'.join([f"  - {class_names[i]}: {report[class_names[i]]['f1-score']:.4f}" for i in worst_classes]))
+        f.write("\n\n" + "-"*40 + "\n\n")
+        f.write("--- Full Classification Report ---\n")
         f.write(classification_report(labels, preds, target_names=class_names))
     
-    print(f"\nVisualizations saved to {args.output_dir}/")
+    print(f"\nPerformance summary saved to {summary_path}")
+    print(f"Visualizations saved to {args.output_dir}/")
     print("Analysis complete!")
 
 if __name__ == '__main__':

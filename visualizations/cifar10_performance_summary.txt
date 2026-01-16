@@ -1,0 +1,45 @@
+========================================
+      Performance and Model Summary
+========================================
+
+Model Checkpoint: viz_output/model.safetensors
+Dataset: CIFAR10
+
+--- Model Stats ---
+Total Parameters: 2,676,778
+Standard FLOPs: 0.1808 GFLOPs
+Memory-aware FLOPs: 0.1808 GFLOPs
+
+--- Evaluation Metrics ---
+Overall Accuracy: 0.8779
+
+--- Per-Class Performance (by F1-score) ---
+Top 3 Best Performing Classes:
+  - automobile: 0.9399
+  - ship: 0.9327
+  - frog: 0.9199
+
+Top 3 Worst Performing Classes:
+  - cat: 0.7509
+  - dog: 0.8173
+  - bird: 0.8478
+
+----------------------------------------
+
+--- Full Classification Report ---
+              precision    recall  f1-score   support
+
+    airplane       0.88      0.91      0.89      1000
+  automobile       0.94      0.94      0.94      1000
+        bird       0.87      0.83      0.85      1000
+         cat       0.74      0.76      0.75      1000
+        deer       0.85      0.86      0.86      1000
+         dog       0.81      0.82      0.82      1000
+        frog       0.91      0.93      0.92      1000
+       horse       0.92      0.89      0.90      1000
+        ship       0.94      0.92      0.93      1000
+       truck       0.92      0.92      0.92      1000
+
+    accuracy                           0.88     10000
+   macro avg       0.88      0.88      0.88     10000
+weighted avg       0.88      0.88      0.88     10000

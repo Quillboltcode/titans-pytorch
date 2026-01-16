@@ -165,3 +165,49 @@ This is the "Outer Loop" training. When you run `loss.backward()` on the main mo
     graph of neural memory
     b,h,w of memory
     cell sample->size of mem
+
+
+    ```mermaid
+    graph TD
+    subgraph Inputs
+        X[Input x]
+        S_prev[Previous Memory State]
+    end
+
+    %% Attention Branch
+    subgraph "1. Attention Branch"
+        X --> Res1[Residual Path]
+        X --> LN1[LayerNorm]
+        LN1 --> MHA[Multihead Attention]
+        MHA --> Add1((+))
+        Res1 --> Add1
+    end
+
+    %% Memory Branch (Replacing FFN)
+    subgraph "2. Memory Branch (FFN Replacement)"
+        Add1 --> Res2[Residual Path]
+        Add1 --> LN2[LayerNorm]
+        
+        LN2 --> NM[Neural Memory Module]
+        S_prev -.-> NM
+        
+        NM --> MO[Memory Output]
+        NM -.-> S_next[Next Memory State]
+        
+        MO --> Linear["Linear Projection (to_out)"]
+        Linear --> Add2((+))
+        Res2 --> Add2
+    end
+
+    %% Outputs
+    subgraph Outputs
+        Add2 --> Out[Output x]
+        S_next --> OutState[New Memory State]
+    end
+
+    %% Styling
+    style NM fill:#f9f,stroke:#333,stroke-width:2px
+    style MHA fill:#bbf,stroke:#333,stroke-width:2px
+    style S_prev stroke-dasharray: 5 5
+    style S_next stroke-dasharray: 5 5
+```
