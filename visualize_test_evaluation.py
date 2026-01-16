@@ -39,8 +39,29 @@ def load_best_model(checkpoint_path, num_classes=10, dim=192):
         )
         
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        model.load_state_dict(checkpoint['model'])
+        if checkpoint_path.endswith('.safetensors'):
+            from safetensors.torch import load_file
+            checkpoint = load_file(checkpoint_path)
+        else:
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict) and 'model' in checkpoint:
+            state_dict = checkpoint['model']
+        elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+            
+        # Strip 'module.' prefix if present (from DataParallel/DDP)
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('module.'):
+                new_state_dict[k[7:]] = v
+            else:
+                new_state_dict[k] = v
+        
+        model.load_state_dict(new_state_dict)
         model.eval()
         
         return model
