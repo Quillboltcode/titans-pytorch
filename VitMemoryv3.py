@@ -83,19 +83,27 @@ class Transformer(nn.Module):
                 Attention(dim, heads = heads, dim_head = dim_head),
                 ff
             ]))
-    def forward(self, x, state=None):
-        # state would be a list of NeuralMemStates, one for each layer
-        # using Memory as layer 
+    def forward(self, x, state=None, memory_training=True, freeze_attention=False):
         new_states = []
         state = state or [None] * len(self.layers)
+        
         for i, (attn, ff) in enumerate(self.layers):
-            # 1. Attention (Local/Global)
-            x = attn(x) + x
+            # 1. Attention
+            if freeze_attention:
+                with torch.no_grad():
+                    attn_out = attn(x)
+            else:
+                attn_out = attn(x)
+            x = attn_out + x
             
             # 2. Neural Memory (Long-term)
             if self.use_memory:
-                # Pass the previous state for this layer
-                out, layer_state = ff(x, state = state[i])
+                if memory_training:
+                    with torch.enable_grad():
+                        out, layer_state = ff(x, state=state[i])
+                else:
+                    with torch.no_grad():
+                        out, layer_state = ff(x, state=state[i])
                 x = out + x
                 new_states.append(layer_state)
             else:
@@ -128,34 +136,52 @@ class SimpleViT(nn.Module):
         ) 
 
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, use_memory=use_memory, memory_chunk_size=memory_chunk_size)
+        self.use_memory = use_memory
 
         self.pool = "mean"
         self.to_latent = nn.Identity()
 
         self.linear_head = nn.Linear(dim, num_classes)
 
-    def forward(self, img):
+    def set_trainable_parameters(self, memory_training=True, freeze_attention=False):
+        """Configure which parameters can learn during TTT"""
+        for name, param in self.named_parameters():
+            # Default: freeze all parameters
+            param.requires_grad = False
+            
+            # Unfreeze memory-related parameters if needed
+            if memory_training and self.use_memory:
+                if 'neural_memory' in name or 'memory_model' in name:
+                    param.requires_grad = True
+            
+            # Unfreeze attention if not frozen
+            if not freeze_attention:
+                if 'attn' in name or 'to_qkv' in name or 'to_out' in name:
+                    param.requires_grad = True
+    
+    def init_memory_state(self, batch_size=1):
+        """Initialize memory state for TTT"""
+        if not self.use_memory:
+            return None
+        
+        # Create initial state compatible with Transformer's expected format
+        return [None] * len(self.transformer.layers)
+    
+    def forward(self, img, state=None, memory_training=True, freeze_attention=False):
         device = img.device
 
         x = self.to_patch_embedding(img)
         x += self.pos_embedding.to(device, dtype=x.dtype)
 
-        x, _ = self.transformer(x)
-        x = x.mean(dim = 1)
-
+        # Pass state through transformer and get updated state
+        x, new_state = self.transformer(
+            x, 
+            state=state,
+            memory_training=memory_training, 
+            freeze_attention=freeze_attention
+        )
+        
+        x = x.mean(dim=1)
         x = self.to_latent(x)
-        return self.linear_head(x)
+        return self.linear_head(x), new_state
 
-if __name__ == '__main__':
-    model = SimpleViT(
-        image_size=32,
-        patch_size=4,
-        num_classes=10,
-        dim=192,
-        depth=6,
-        heads=3,
-        mlp_dim=192*4,
-        use_memory=True,
-        memory_chunk_size=64
-    )
-    print(sum(p.numel() for p in model.parameters() if p.requires_grad))

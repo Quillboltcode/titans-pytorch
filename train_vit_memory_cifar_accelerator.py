@@ -94,7 +94,8 @@ def set_seed(seed=42):
 @click.option('--wandb_project', default='memory-vit-cifar10', help='WandB Project Name')
 @click.option('--seed', default=42, help='Random seed')
 @click.option('--use_mixup', is_flag=True, help='Use mixup augmentation (alpha=0.2)')
-def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup):
+@click.option('--pretrain_epochs', default=0, help='Epochs to pre-train attention layers before memory adaptation')
+def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup, pretrain_epochs):
     set_seed(seed)
     
     # Setup accelerator for multi-GPU training
@@ -123,7 +124,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
     }
     
     # Set run name based on configuration
-    run_name = "baseline" if baseline else "memory_vit"
+    run_name = "baseline" if baseline else ("memory_vit_pretrained" if pretrain_epochs > 0 else "memory_vit")
 
     # Initialize wandb tracking
     accelerator.init_trackers(
@@ -169,6 +170,58 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
     test_loader = DataLoader(testset, batch_size=100, shuffle=False, 
                             num_workers=4, pin_memory=True)
     
+    # -------------------------------------------------------------------------
+    # Phase 1: Pre-training Attention (Optional)
+    # -------------------------------------------------------------------------
+    pretrained_state_dict = None
+    
+    if pretrain_epochs > 0 and not baseline:
+        if accelerator.is_main_process:
+            print(f"\n=== Phase 1: Pre-training Attention Layers ({pretrain_epochs} epochs) ===")
+            
+        # Initialize Standard ViT for pre-training
+        pre_model = SimpleViT(
+            image_size=32, patch_size=4, num_classes=10, dim=dim, depth=6, heads=3, mlp_dim=dim * 4,
+            use_memory=False, memory_chunk_size=64
+        )
+        
+        pre_optimizer = optim.AdamW(pre_model.parameters(), lr=lr, weight_decay=0.05)
+        pre_criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+        
+        pre_model, pre_optimizer, pre_train_loader = accelerator.prepare(
+            pre_model, pre_optimizer, train_loader
+        )
+        
+        # Simple pre-training loop
+        for epoch in range(pretrain_epochs):
+            pre_model.train()
+            total_loss = 0
+            for imgs, labels in tqdm(pre_train_loader, desc=f"Pre-train Epoch {epoch+1}/{pretrain_epochs}", 
+                                   disable=not accelerator.is_main_process):
+                pre_optimizer.zero_grad()
+                logits = pre_model(imgs) # Standard forward, attention is trained
+                loss = pre_criterion(logits, labels)
+                accelerator.backward(loss)
+                pre_optimizer.step()
+                total_loss += loss.item()
+            
+            if accelerator.is_main_process:
+                print(f"Pre-train Loss: {total_loss/len(pre_train_loader):.4f}")
+        
+        # Save weights
+        accelerator.wait_for_everyone()
+        pretrained_state_dict = accelerator.get_state_dict(pre_model)
+        
+        # Cleanup to free memory
+        del pre_model, pre_optimizer
+        torch.cuda.empty_cache()
+        if accelerator.is_main_process:
+            print("=== Pre-training Complete. Starting Memory Adaptation ===\n")
+
+    # -------------------------------------------------------------------------
+    # Phase 2: Main Training (Memory Adaptation)
+    # -------------------------------------------------------------------------
+    
     # Model initialization
     model = SimpleViT(
         image_size=32,
@@ -182,6 +235,25 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
         memory_chunk_size=64
     )
     
+    # Load pre-trained weights if available
+    if pretrained_state_dict is not None:
+        if accelerator.is_main_process:
+            print("Loading pre-trained attention weights...")
+        
+        # Filter out FFN weights (as we are switching to Memory)
+        # We keep: patch_embedding, pos_embedding, cls_token, norm, linear_head, and Attention layers
+        model_dict = model.state_dict()
+        # Transfer common keys (Attention layers have same names in both models)
+        pretrained_dict = {k: v for k, v in pretrained_state_dict.items() if k in model_dict and v.shape == model_dict[k].shape}
+        model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
+        
+        # Freeze Attention layers if we pre-trained them
+        for name, param in model.named_parameters():
+            # Freeze everything except Memory modules and Head (optional, keeping head trainable is usually good)
+            if 'transformer' in name and 'layers' in name and '1' not in name: # '0' is Attention, '1' is Memory/FFN
+                param.requires_grad = False
+                
     # Count parameters and FLOPs (main process only)
     if accelerator.is_main_process:
         params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -259,10 +331,13 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
             
             optimizer.zero_grad()
             
+            # Pass freeze_attention=True if we are in adaptation phase (pretrain_epochs > 0)
+            freeze_attn = (pretrain_epochs > 0)
+            
             # Apply mixup if enabled
             if use_mixup and epoch < epochs * 0.8:  # Only apply mixup for first 80% of training
                 imgs, labels_a, labels_b, lam = mixup_fn(imgs, labels)
-                logits = model(imgs)
+                logits, _ = model(imgs, freeze_attention=freeze_attn)
                 loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
                 
                 # Mixup accuracy calculation
@@ -270,7 +345,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
                 correct += (lam * predicted.eq(labels_a).sum().item() + 
                            (1 - lam) * predicted.eq(labels_b).sum().item())
             else:
-                logits = model(imgs)
+                logits, _ = model(imgs, freeze_attention=freeze_attn)
                 loss = criterion(logits, labels)
                 _, predicted = logits.max(1)
                 correct += predicted.eq(labels).sum().item()
@@ -305,10 +380,18 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
         correct = 0
         total = 0
         
-        with torch.no_grad():
-            for imgs, labels in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} Validation", 
+        # Use inference_mode with gradients enabled for memory parameters
+        with torch.inference_mode(mode=False):
+            for imgs, labels in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} Validation",
                                     disable=not accelerator.is_main_process):
-                logits = model(imgs)
+                # Enable gradients only for memory parameters
+                for name, param in model.named_parameters():
+                    if 'memory' in name or 'neural_memory' in name:
+                        param.requires_grad = True
+                    else:
+                        param.requires_grad = False
+                
+                logits, _ = model(imgs)
                 loss = criterion(logits, labels)
                 val_loss += loss.item()
                 
@@ -349,9 +432,17 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup)
     correct = 0
     total = 0
     
-    with torch.no_grad():
-        for imgs, labels in tqdm(test_loader, desc="Final Test Evaluation", 
+    # Use inference_mode with gradients enabled for memory parameters
+    with torch.inference_mode(mode=False):
+        for imgs, labels in tqdm(test_loader, desc="Final Test Evaluation",
                                 disable=not accelerator.is_main_process):
+            # Enable gradients only for memory parameters
+            for name, param in model.named_parameters():
+                if 'memory' in name or 'neural_memory' in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
+            
             logits = model(imgs)
             loss = criterion(logits, labels)
             test_loss += loss.item()

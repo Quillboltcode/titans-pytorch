@@ -57,6 +57,47 @@ class MemoryFFNTransformerBlock(nn.Module):
         return x, next_memory_state
 
 # -----------------------------------------------------------------------------
+# Standard Transformer Block (Baseline)
+# -----------------------------------------------------------------------------
+
+class StandardFFNTransformerBlock(nn.Module):
+    def __init__(
+        self,
+        dim,
+        heads,
+        mlp_dim_ratio = 4
+    ):
+        super().__init__()
+        
+        # 1. Standard Attention
+        self.norm_attn = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
+        
+        # 2. Standard FFN
+        self.norm_ffn = nn.LayerNorm(dim)
+        mlp_dim = int(dim * mlp_dim_ratio)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, dim)
+        )
+
+    def forward(self, x, memory_state = None):
+        # Attention Branch
+        attn_residual = x
+        x_norm = self.norm_attn(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm)
+        x = attn_residual + attn_out
+        
+        # FFN Branch
+        ffn_residual = x
+        x_norm = self.norm_ffn(x)
+        ffn_out = self.ffn(x_norm)
+        x = ffn_residual + ffn_out
+        
+        return x, memory_state
+
+# -----------------------------------------------------------------------------
 # Memory ViT for Classification
 # -----------------------------------------------------------------------------
 
@@ -69,7 +110,9 @@ class MemoryViT(nn.Module):
         dim = 192,           # Small dimension for CIFAR
         depth = 6,
         heads = 3,
-        memory_chunk_size = 64 # Equal to sequence length (8*8)
+        memory_chunk_size = 64, # Equal to sequence length (8*8)
+        use_memory = True,
+        mlp_dim_ratio = 4
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -94,13 +137,22 @@ class MemoryViT(nn.Module):
         # 4. Transformer Layers
         self.layers = nn.ModuleList([])
         for _ in range(depth):
-            self.layers.append(
-                MemoryFFNTransformerBlock(
-                    dim=dim, 
-                    heads=heads, 
-                    memory_chunk_size=memory_chunk_size
+            if use_memory:
+                self.layers.append(
+                    MemoryFFNTransformerBlock(
+                        dim=dim, 
+                        heads=heads, 
+                        memory_chunk_size=memory_chunk_size
+                    )
                 )
-            )
+            else:
+                self.layers.append(
+                    StandardFFNTransformerBlock(
+                        dim=dim,
+                        heads=heads,
+                        mlp_dim_ratio=mlp_dim_ratio
+                    )
+                )
             
         self.norm = nn.LayerNorm(dim)
         self.to_logits = nn.Linear(dim, num_classes)
@@ -120,6 +172,14 @@ class MemoryViT(nn.Module):
         return self.to_logits(self.norm(cls_token_out))
 
 if __name__ == '__main__':
-    model = MemoryViT()
-    params_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Total Parameters: {params_count:,}")
+    print("--- Memory ViT ---")
+    model_mem = MemoryViT(use_memory=True)
+    params_mem = sum(p.numel() for p in model_mem.parameters() if p.requires_grad)
+    print(f"Total Parameters: {params_mem:,}")
+
+    print("\n--- Standard ViT (Baseline) ---")
+    model_std = MemoryViT(use_memory=False)
+    params_std = sum(p.numel() for p in model_std.parameters() if p.requires_grad)
+    print(f"Total Parameters: {params_std:,}")
+    
+    print(f"\nDifference: {params_mem - params_std:,} parameters")
