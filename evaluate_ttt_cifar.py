@@ -88,91 +88,96 @@ def evaluate_with_ttt(model, test_loader, accelerator, ttt_steps=1):
     """
     Evaluate with Test-Time Training for NeuralMemory models
     """
-    # Set model to eval mode (batchnorm/dropout)
-    model.eval()
-
+    # Critical: Set model to TRAIN mode to enable gradient flow
+    # We'll manually control batchnorm behavior if needed
+    model.train()
+    
     # Configure trainable parameters for TTT
     model.set_trainable_parameters(memory_training=True, freeze_attention=True)
-
+    
     # Initialize memory states for each layer
-    # NeuralMemory handles its own updates internally - no external optimizer needed
     states = [None] * len(model.transformer.layers) if hasattr(model.transformer, 'layers') else None
-
+    
+    # Create a dummy optimizer for gradient flow (NOT for parameter updates)
+    # This ensures gradients are computed and available to NeuralMemory
+    memory_params = [p for n, p in model.named_parameters() if 'neural_memory' in n.lower()]
+    if memory_params:
+        dummy_optimizer = torch.optim.SGD(memory_params, lr=0.0)
+    
     # Metrics tracking
     total_loss = 0
     correct = 0
     total = 0
-
-    # TTT Evaluation loop - NO torch.no_grad() needed
+    
     progress_bar = tqdm(test_loader, desc="TTT Evaluation")
-
+    
     for batch_idx, (imgs, labels) in enumerate(progress_bar):
         imgs = imgs.to(accelerator.device)
         labels = labels.to(accelerator.device)
-
+        
         # TTT Phase: Update memory using current batch
         for ttt_step in range(ttt_steps):
             initial_states = [detach_mem_state(s) for s in states] if states else None
-
+            
+            # Reset gradients before forward pass
+            if memory_params:
+                dummy_optimizer.zero_grad()
+            
             # Forward pass with memory updates enabled
-            # NeuralMemory computes gradients internally for its updates
             logits, new_states = model(
                 imgs,
                 state=states,
                 memory_training=True,  # Enables memory updates
                 freeze_attention=True   # Keeps attention frozen
             )
-
-            # Check if states changed
-            if batch_idx == 0 and ttt_step == 0:  # Only check first batch/step for logging
+            
+            # Critical: Compute loss AND trigger backward pass
+            loss = F.cross_entropy(logits, labels)
+            loss.backward()  # This populates .grad attributes needed by NeuralMemory
+            
+            # Check if states changed (debugging)
+            if batch_idx == 0 and ttt_step == 0:
                 changed = check_state_change(initial_states, new_states, f"TTT Step {ttt_step}")
                 if not changed:
-                    print("Warning: NeuralMemState did not change during TTT update!")
+                    print("⚠️  Warning: NeuralMemState did not change during TTT update!")
                 else:
-                    print("NeuralMemState changed during TTT update!")
-
-            # No external backward needed - NeuralMemory handles internal updates
-            # But we need to compute loss to provide supervision signal
-            _ = F.cross_entropy(logits, labels)  # Loss is used internally by NeuralMemory
-
+                    print("✅ NeuralMemState changed during TTT update!")
+            
             # Update states for next iteration
             states = [detach_mem_state(s) for s in new_states] if new_states else None
-
+        
         # Inference Phase: Final prediction with adapted memory
-        with torch.no_grad():  # Now we can disable gradients for final prediction
+        with torch.no_grad():
             logits, _ = model(
                 imgs,
                 state=states,
-                memory_training=False,  # No more updates
+                memory_training=False,
                 freeze_attention=True
             )
-
+        
         # Standard evaluation metrics
         loss = F.cross_entropy(logits, labels)
         total_loss += loss.item()
-
+        
         predictions = logits.argmax(dim=-1)
         predictions, labels = accelerator.gather_for_metrics((predictions, labels))
-
+        
         total += labels.size(0)
         correct += predictions.eq(labels).sum().item()
-
-        # Update progress bar
+        
         current_acc = 100. * correct / total
         progress_bar.set_postfix({'acc': f'{current_acc:.2f}%'})
-
-        # Detach states between batches to prevent infinite gradient graphs
+        
+        # Detach states between batches
         if states is not None:
             states = [detach_mem_state(s) for s in states]
-
-        # Only process first few batches for testing
+        
         if batch_idx >= 2:
             break
-
-    # Final metrics
+    
     test_acc = 100. * correct / total
     avg_loss = total_loss / (batch_idx + 1)
-
+    
     return test_acc, avg_loss
 
 @click.command()
