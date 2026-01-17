@@ -74,7 +74,16 @@ class Transformer(nn.Module):
                     dim = dim,
                     chunk_size = memory_chunk_size,
                     dim_head = dim_head,
-                    heads = heads
+                    heads = heads,
+                    # need to set this to cap vram memory
+                    per_head_learned_parameters=False,
+                    use_accelerated_scan=True,
+                    spectral_norm_surprises=True,
+                    max_grad_norm=1.0,
+                    num_kv_per_token=1,
+                    #Minimal model
+                    default_model_kwargs=dict(depth=1, expansion_factor=1),
+                    
                 )
             else:
                 ff = FeedForward(dim, mlp_dim)
@@ -185,3 +194,8 @@ class SimpleViT(nn.Module):
         x = self.to_latent(x)
         return self.linear_head(x), new_state
 
+
+if __name__ == '__main__':
+    print("--- SimpleViT ---")
+    model = SimpleViT(image_size=32, patch_size=4, num_classes=10, dim=192, depth=6, heads=3, mlp_dim=768)
+    print(f'Total Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}')
