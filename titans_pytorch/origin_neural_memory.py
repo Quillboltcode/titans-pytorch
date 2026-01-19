@@ -45,8 +45,8 @@ LinearNoBias = partial(Linear, bias = False)
 
 NeuralMemState = namedtuple('NeuralMemState', [
     'seq_index',
-    'weights',             # The "compressed" memory (replaces global KV cache)
-    'cache_store_segment', # Small buffer for chunking updates (not an attention KV cache)
+    'weights',
+    'cache_store_segment',
     'states',
     'updates',
 ])
@@ -256,11 +256,6 @@ def default_loss_fn(pred, target):
     return (pred - target).pow(2).mean(dim = -1)
 
 class NeuralMemory(Module):
-    """
-    Neural Memory module.
-    Stores history in the weights of a neural network (memory_model), updated via gradient descent during the forward pass.
-    This serves as the long-term memory, acting as a compressed alternative to explicit KV caching of history.
-    """
     def __init__(
         self,
         dim,
@@ -543,9 +538,6 @@ class NeuralMemory(Module):
 
         self.register_buffer('zero', torch.tensor(0.), persistent = False)
 
-        # visualization hook for debugging and analysis
-        self._visualization_hook = None
-
     @property
     def memory_model_parameter_dict(self):
         return TensorDict(dict(zip(self.memory_model_parameter_names, self.memory_model_parameters)))
@@ -752,7 +744,7 @@ class NeuralMemory(Module):
             if not return_surprises:
                 return output
 
-            return (*output, (None, None))
+            return (*output, (unweighted_mem_model_loss, adaptive_lr))
 
         # momentum + weight decay - momentum is the new contribution, as most linear RNNs have learned forgetting gates
 
@@ -1070,19 +1062,6 @@ class NeuralMemory(Module):
 
         if detach_mem_state:
             next_neural_mem_state = mem_state_detach(next_neural_mem_state)
-
-        # visualization hook for capturing intermediate values
-        if self._visualization_hook is not None:
-            viz_data = {
-                'retrieve_seq': retrieve_seq,
-                'queries': self.to_queries(self.retrieve_norm(retrieve_seq)),
-                'weights': weights,
-                'retrieved': retrieved,
-                'surprises': surprises[0] if return_surprises else None,
-                'adaptive_lr': surprises[1] if return_surprises else None,
-                'state': next_neural_mem_state,
-            }
-            self._visualization_hook(viz_data)
 
         # returning
 

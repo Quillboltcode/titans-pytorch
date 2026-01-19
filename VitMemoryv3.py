@@ -2,6 +2,7 @@ import torch
 from torch import nn
 
 from einops import rearrange
+from einops import rearrange, repeat
 from einops.layers.torch import Rearrange
 from titans_pytorch.neural_memory import NeuralMemory
 
@@ -144,6 +145,8 @@ class SimpleViT(nn.Module):
             dim = dim,
         ) 
 
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+
         self.transformer = Transformer(dim, depth, heads, dim_head, mlp_dim, use_memory=use_memory, memory_chunk_size=memory_chunk_size)
         self.use_memory = use_memory
 
@@ -182,6 +185,10 @@ class SimpleViT(nn.Module):
         x = self.to_patch_embedding(img)
         x += self.pos_embedding.to(device, dtype=x.dtype)
 
+        b = x.shape[0]
+        cls_tokens = repeat(self.cls_token, '1 1 d -> b 1 d', b = b)
+        x = torch.cat((x, cls_tokens), dim = 1)
+
         # Pass state through transformer and get updated state
         x, new_state = self.transformer(
             x, 
@@ -191,6 +198,7 @@ class SimpleViT(nn.Module):
         )
         
         x = x.mean(dim=1)
+        x = x[:, -1]
         x = self.to_latent(x)
         return self.linear_head(x), new_state
 
