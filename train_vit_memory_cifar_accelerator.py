@@ -284,6 +284,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup,
     # Setup for checkpointing
     best_val_acc = 0.0
     checkpoint_dir = "best_checkpoint"
+    memory_state = model.init_memory_state(batch_size=batch_size)
     
     # Training loop
     for epoch in range(epochs):
