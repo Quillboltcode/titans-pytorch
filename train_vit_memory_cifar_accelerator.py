@@ -315,7 +315,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup,
             # Apply mixup if enabled
             if use_mixup and epoch < epochs * 0.8:  # Only apply mixup for first 80% of training
                 imgs, labels_a, labels_b, lam = mixup_fn(imgs, labels)
-                logits = model(imgs)
+                logits, _ = model(imgs)
                 loss = mixup_criterion(criterion, logits, labels_a, labels_b, lam)
                 
                 # Mixup accuracy calculation
@@ -323,7 +323,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup,
                 correct += (lam * predicted.eq(labels_a).sum().item() + 
                            (1 - lam) * predicted.eq(labels_b).sum().item())
             else:
-                logits = model(imgs)
+                logits, _ = model(imgs)
                 loss = criterion(logits, labels)
                 _, predicted = logits.max(1)
                 correct += predicted.eq(labels).sum().item()
@@ -366,7 +366,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup,
         with torch.no_grad():
             for imgs, labels in tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} Validation", 
                                     disable=not accelerator.is_main_process):
-                logits = model(imgs)
+                logits, _ = model(imgs)
                 loss = criterion(logits, labels)
                 val_loss += loss.item()
                 
@@ -410,7 +410,7 @@ def train(baseline, batch_size, epochs, lr, dim, wandb_project, seed, use_mixup,
     with torch.no_grad():
         for imgs, labels in tqdm(test_loader, desc="Final Test Evaluation", 
                                 disable=not accelerator.is_main_process):
-            logits = model(imgs)
+            logits, _ = model(imgs)
             loss = criterion(logits, labels)
             test_loss += loss.item()
             
